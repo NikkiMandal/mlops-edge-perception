@@ -1,0 +1,606 @@
+# PIPELINE DEFINITION
+# Name: kitti-rtdetr-pipeline
+# Description: RT-DETR KITTI: data_prep -> train -> optimize -> monitor
+# Inputs:
+#    baseline_gcs_path: str [Default: 'kitti/images/train']
+#    batch_size: int [Default: 8.0]
+#    bucket_name: str [Default: 'mlops-edge-perception-bucket']
+#    drift_threshold: float [Default: 0.3]
+#    epochs: int [Default: 20.0]
+#    gcs_data_path: str [Default: 'kitti']
+#    lr: float [Default: 0.0001]
+#    new_data_gcs_path: str [Default: 'kitti/images/val']
+#    num_train: int [Default: 400.0]
+#    num_val: int [Default: 100.0]
+#    project_id: str [Default: 'mlops-edge-perception']
+#    region: str [Default: 'us-central1']
+components:
+  comp-data-prep-component:
+    executorLabel: exec-data-prep-component
+    inputDefinitions:
+      parameters:
+        bucket_name:
+          parameterType: STRING
+        gcs_data_path:
+          parameterType: STRING
+        num_train:
+          parameterType: NUMBER_INTEGER
+        num_val:
+          parameterType: NUMBER_INTEGER
+        project_id:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-monitor-component:
+    executorLabel: exec-monitor-component
+    inputDefinitions:
+      parameters:
+        baseline_gcs_path:
+          parameterType: STRING
+        bucket_name:
+          parameterType: STRING
+        drift_threshold:
+          parameterType: NUMBER_DOUBLE
+        new_data_gcs_path:
+          parameterType: STRING
+        optimize_uri:
+          parameterType: STRING
+        project_id:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: BOOLEAN
+  comp-optimize-component:
+    executorLabel: exec-optimize-component
+    inputDefinitions:
+      parameters:
+        bucket_name:
+          parameterType: STRING
+        model_uri:
+          parameterType: STRING
+        project_id:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-train-component:
+    executorLabel: exec-train-component
+    inputDefinitions:
+      parameters:
+        batch_size:
+          parameterType: NUMBER_INTEGER
+        bucket_name:
+          parameterType: STRING
+        dataset_uri:
+          parameterType: STRING
+        epochs:
+          parameterType: NUMBER_INTEGER
+        gcs_data_path:
+          parameterType: STRING
+        lr:
+          parameterType: NUMBER_DOUBLE
+        project_id:
+          parameterType: STRING
+        region:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-data-prep-component:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - data_prep_component
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'google-cloud-storage>=2.0.0'\
+          \ 'datasets>=2.0.0' 'Pillow>=9.0.0' 'tqdm>=4.0.0'  &&  python3 -m pip install\
+          \ --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef data_prep_component(\n    project_id: str,\n    bucket_name:\
+          \ str,\n    gcs_data_path: str,\n    num_train: int,\n    num_val: int,\n\
+          ) -> str:\n    \"\"\"\n    Download KITTI from HuggingFace, convert to YOLO\
+          \ format, upload to GCS.\n    Skips if data already exists in GCS. Returns\
+          \ the GCS dataset URI.\n    \"\"\"\n    import json\n    from pathlib import\
+          \ Path\n    from datasets import load_dataset\n    from google.cloud import\
+          \ storage\n    from tqdm import tqdm\n\n    LOCAL_DIR = Path(\"/tmp/kitti_processed\"\
+          )\n    CLASSES = {\"Car\": 0, \"Pedestrian\": 1, \"Cyclist\": 2}\n\n   \
+          \ def check_exists() -> bool:\n        client = storage.Client(project=project_id)\n\
+          \        blobs  = list(client.bucket(bucket_name).list_blobs(\n        \
+          \    prefix=f\"{gcs_data_path}/images/train\", max_results=5\n        ))\n\
+          \        return len(blobs) > 0\n\n    def upload_file(local_path: Path,\
+          \ gcs_path: str) -> None:\n        client = storage.Client(project=project_id)\n\
+          \        client.bucket(bucket_name).blob(gcs_path).upload_from_filename(\n\
+          \            str(local_path)\n        )\n\n    def convert_to_yolo(sample:\
+          \ dict, w: int, h: int) -> list:\n        lines = []\n        for obj in\
+          \ sample.get(\"label\", []):\n            cls_name = obj.get(\"type\", \"\
+          \")\n            if cls_name not in CLASSES:\n                continue\n\
+          \            x1, y1, x2, y2 = obj[\"bbox\"]\n            bw = (x2 - x1)\
+          \ / w\n            bh = (y2 - y1) / h\n            if bw <= 0 or bh <= 0:\n\
+          \                continue\n            cx = (x1 + x2) / 2 / w\n        \
+          \    cy = (y1 + y2) / 2 / h\n            lines.append(\n               \
+          \ f\"{CLASSES[cls_name]} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\"\n       \
+          \     )\n        return lines\n\n    if check_exists():\n        print(f\"\
+          Data already at gs://{bucket_name}/{gcs_data_path} \u2014 skipping\")\n\
+          \        return f\"gs://{bucket_name}/{gcs_data_path}\"\n\n    print(\"\
+          Loading KITTI from HuggingFace (nateraw/kitti)...\")\n    dataset = load_dataset(\"\
+          nateraw/kitti\", split=\"train\")\n\n    splits = {\n        \"train\":\
+          \ range(0, num_train),\n        \"val\":   range(num_train, num_train +\
+          \ num_val),\n    }\n\n    for split, idx_range in splits.items():\n    \
+          \    img_dir = LOCAL_DIR / \"images\" / split\n        lbl_dir = LOCAL_DIR\
+          \ / \"labels\" / split\n        img_dir.mkdir(parents=True, exist_ok=True)\n\
+          \        lbl_dir.mkdir(parents=True, exist_ok=True)\n\n        saved = 0\n\
+          \        for idx in tqdm(idx_range, desc=f\"Processing {split}\"):\n   \
+          \         sample = dataset[idx]\n            img    = sample[\"image\"].convert(\"\
+          RGB\")\n            w, h   = img.size\n\n            yolo_lines = convert_to_yolo(sample,\
+          \ w, h)\n            if not yolo_lines:\n                continue\n\n  \
+          \          stem = f\"{idx:06d}\"\n            img.save(str(img_dir / f\"\
+          {stem}.png\"))\n            (lbl_dir / f\"{stem}.txt\").write_text(\"\\\
+          n\".join(yolo_lines))\n            saved += 1\n\n        print(f\"  {split}:\
+          \ {saved} samples saved\")\n\n    config = {\n        \"classes\": list(CLASSES.keys()),\n\
+          \        \"num_classes\": len(CLASSES),\n        \"gcs_path\": f\"gs://{bucket_name}/{gcs_data_path}\"\
+          ,\n    }\n    cfg_path = LOCAL_DIR / \"dataset_config.json\"\n    cfg_path.write_text(json.dumps(config,\
+          \ indent=2))\n\n    all_files = [f for f in LOCAL_DIR.rglob(\"*\") if f.is_file()]\n\
+          \    print(f\"Uploading {len(all_files)} files to GCS...\")\n    for local_file\
+          \ in tqdm(all_files, desc=\"Uploading\"):\n        rel      = local_file.relative_to(LOCAL_DIR)\n\
+          \        gcs_path = f\"{gcs_data_path}/{rel}\".replace(\"\\\\\", \"/\")\n\
+          \        upload_file(local_file, gcs_path)\n\n    gcs_uri = f\"gs://{bucket_name}/{gcs_data_path}\"\
+          \n    print(f\"Dataset ready at {gcs_uri}\")\n    return gcs_uri\n\n"
+        image: python:3.10-slim
+    exec-monitor-component:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - monitor_component
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'evidently==0.7.21'\
+          \ 'pandas>=2.0.0' 'numpy>=1.24.0' 'google-cloud-storage>=2.0.0' 'Pillow>=9.0.0'\
+          \ 'scikit-learn>=1.3.0'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef monitor_component(\n    project_id:        str,\n    bucket_name:\
+          \       str,\n    baseline_gcs_path: str,\n    new_data_gcs_path: str,\n\
+          \    drift_threshold:   float,\n    optimize_uri:      str,\n) -> bool:\n\
+          \    \"\"\"\n    Detect image feature drift between baseline (train) and\
+          \ new data (val)\n    using Evidently. Uploads a drift summary JSON to GCS.\n\
+          \    Returns True if retraining should be triggered.\n    \"\"\"\n    import\
+          \ json\n    import numpy as np\n    import pandas as pd\n    from pathlib\
+          \ import Path\n    from datetime import datetime\n    from PIL import Image\n\
+          \    from google.cloud import storage\n    from evidently import Report,\
+          \ Dataset\n    from evidently.presets import DataDriftPreset\n\n    LOCAL_BASE\
+          \  = Path(\"/tmp/drift/baseline\")\n    LOCAL_NEW   = Path(\"/tmp/drift/new_data\"\
+          )\n    REPORTS_DIR = Path(\"/tmp/drift/reports\")\n    NUM_SAMPLES = 100\n\
+          \n    def download_images(gcs_prefix: str, local_dir: Path) -> None:\n \
+          \       client = storage.Client(project=project_id)\n        blobs  = [b\
+          \ for b in client.bucket(bucket_name).list_blobs(\n            prefix=gcs_prefix\n\
+          \        ) if b.name.endswith(\".png\")][:NUM_SAMPLES]\n        if not blobs:\n\
+          \            raise FileNotFoundError(\n                f\"No images at gs://{bucket_name}/{gcs_prefix}\"\
+          \n            )\n        local_dir.mkdir(parents=True, exist_ok=True)\n\
+          \        for blob in blobs:\n            dest = local_dir / Path(blob.name).name\n\
+          \            if not dest.exists():\n                blob.download_to_filename(str(dest))\n\
+          \        print(f\"Downloaded {len(blobs)} images \u2192 {local_dir}\")\n\
+          \n    def extract_features(img_dir: Path) -> pd.DataFrame:\n        rows\
+          \ = []\n        for p in sorted(img_dir.glob(\"*.png\")):\n            arr\
+          \     = np.array(Image.open(p).convert(\"RGB\"), dtype=np.float32) / 255.0\n\
+          \            r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]\n      \
+          \      rows.append({\n                \"mean_brightness\": float(arr.mean()),\n\
+          \                \"std_brightness\":  float(arr.std()),\n              \
+          \  \"mean_r\":          float(r.mean()),\n                \"mean_g\":  \
+          \        float(g.mean()),\n                \"mean_b\":          float(b.mean()),\n\
+          \                \"std_r\":           float(r.std()),\n                \"\
+          std_g\":           float(g.std()),\n                \"std_b\":         \
+          \  float(b.std()),\n                \"p25\":             float(np.percentile(arr,\
+          \ 25)),\n                \"p75\":             float(np.percentile(arr, 75)),\n\
+          \                \"iqr\":             float(\n                    np.percentile(arr,\
+          \ 75) - np.percentile(arr, 25)\n                ),\n            })\n   \
+          \     df = pd.DataFrame(rows)\n        print(f\"  Extracted {len(df)} feature\
+          \ vectors from {img_dir.name}\")\n        return df\n\n    # Download samples\n\
+          \    download_images(baseline_gcs_path, LOCAL_BASE)\n    download_images(new_data_gcs_path,\
+          \ LOCAL_NEW)\n\n    # Extract features\n    baseline_df = extract_features(LOCAL_BASE)\n\
+          \    new_data_df = extract_features(LOCAL_NEW)\n\n    # Run Evidently drift\
+          \ report\n    print(\"\\nRunning Evidently drift detection...\")\n    report\
+          \ = Report([DataDriftPreset()])\n    result = report.run(\n        reference_data=Dataset.from_pandas(baseline_df),\n\
+          \        current_data=Dataset.from_pandas(new_data_df),\n    )\n    res_dict\
+          \    = result.dict()\n    drift_share = float(res_dict.get(\"drift_share\"\
+          , 0.0))\n    retrain     = drift_share > drift_threshold\n\n    print(f\"\
+          Drift share:    {drift_share * 100:.1f}%\")\n    print(f\"Threshold:   \
+          \   {drift_threshold * 100:.0f}%\")\n    print(f\"Retrain needed: {retrain}\"\
+          )\n\n    # Save summary\n    timestamp = datetime.now().strftime(\"%Y%m%d_%H%M%S\"\
+          )\n    summary = {\n        \"timestamp\":      timestamp,\n        \"drift_share\"\
+          :    drift_share,\n        \"drift_detected\": retrain,\n        \"threshold\"\
+          :      drift_threshold,\n        \"action\":         \"retrain\" if retrain\
+          \ else \"none\",\n    }\n    REPORTS_DIR.mkdir(parents=True, exist_ok=True)\n\
+          \    summary_path = REPORTS_DIR / f\"drift_summary_{timestamp}.json\"\n\
+          \    summary_path.write_text(json.dumps(summary, indent=2))\n\n    client\
+          \     = storage.Client(project=project_id)\n    gcs_report = f\"monitoring/drift_reports/{summary_path.name}\"\
+          \n    client.bucket(bucket_name).blob(gcs_report).upload_from_filename(\n\
+          \        str(summary_path)\n    )\n    print(f\"Report \u2192 gs://{bucket_name}/{gcs_report}\"\
+          )\n\n    return retrain\n\n"
+        image: python:3.10-slim
+    exec-optimize-component:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - optimize_component
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'torch>=2.0.0'\
+          \ 'transformers>=4.30.0' 'onnx>=1.14.0' 'onnxruntime>=1.16.0' 'google-cloud-storage>=2.0.0'\
+          \ 'numpy>=1.24.0' 'Pillow>=9.0.0'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef optimize_component(\n    project_id:  str,\n    bucket_name:\
+          \ str,\n    model_uri:   str,\n) -> str:\n    \"\"\"\n    Download trained\
+          \ model, export to ONNX, benchmark FP32/ONNX/INT8-PTQ,\n    upload results\
+          \ to GCS. Returns GCS path to optimization outputs.\n    \"\"\"\n    import\
+          \ json\n    import time\n    import torch\n    import numpy as np\n    import\
+          \ onnxruntime as ort\n    from pathlib import Path\n    from transformers\
+          \ import AutoModelForObjectDetection\n    from google.cloud import storage\n\
+          \n    LOCAL_MODEL = Path(\"/tmp/rtdetr_model\")\n    OUTPUT_DIR  = Path(\"\
+          /tmp/optimize_outputs\")\n    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)\n\
+          \n    MODEL_GCS_PREFIX = \"models/rtdetr_kitti/best_model\"\n    DUMMY_SHAPE\
+          \      = (1, 3, 640, 640)\n    WARMUP           = 10\n    BENCH_RUNS   \
+          \    = 50\n\n    # \u2500\u2500 Download model \u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\n    print(f\"Downloading model from gs://{bucket_name}/{MODEL_GCS_PREFIX}...\"\
+          )\n    client = storage.Client(project=project_id)\n    bucket = client.bucket(bucket_name)\n\
+          \    blobs  = [b for b in bucket.list_blobs(prefix=MODEL_GCS_PREFIX)\n \
+          \             if not b.name.endswith(\"/\")]\n\n    if not blobs:\n    \
+          \    raise RuntimeError(f\"No model blobs at gs://{bucket_name}/{MODEL_GCS_PREFIX}\"\
+          )\n\n    LOCAL_MODEL.mkdir(parents=True, exist_ok=True)\n    for blob in\
+          \ blobs:\n        rel  = blob.name[len(MODEL_GCS_PREFIX) + 1:]\n       \
+          \ dest = LOCAL_MODEL / rel\n        dest.parent.mkdir(parents=True, exist_ok=True)\n\
+          \        blob.download_to_filename(str(dest))\n    print(f\"Downloaded {len(blobs)}\
+          \ files\")\n\n    model = AutoModelForObjectDetection.from_pretrained(str(LOCAL_MODEL))\n\
+          \    model.eval()\n\n    # \u2500\u2500 Timing helper \u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    def bench_torch(m, inp,\
+          \ label: str):\n        with torch.no_grad():\n            for _ in range(WARMUP):\n\
+          \                m(pixel_values=inp)\n        lats = []\n        with torch.no_grad():\n\
+          \            for _ in range(BENCH_RUNS):\n                t0 = time.perf_counter()\n\
+          \                m(pixel_values=inp)\n                lats.append((time.perf_counter()\
+          \ - t0) * 1000)\n        ms   = float(np.mean(lats))\n        fps  = 1000.0\
+          \ / ms\n        size = sum(\n            p.numel() * p.element_size() for\
+          \ p in m.parameters()\n        ) / (1024 * 1024)\n        print(f\"  {label}:\
+          \ {ms:.1f}ms | {fps:.1f} FPS | {size:.1f}MB\")\n        return ms, fps,\
+          \ size\n\n    results = {}\n    dummy   = torch.randn(DUMMY_SHAPE)\n\n \
+          \   # FP32 baseline\n    ms, fps, size = bench_torch(model, dummy, \"PyTorch\
+          \ FP32\")\n    results[\"pytorch_fp32\"] = {\n        \"format\": \"PyTorch\
+          \ FP32\",\n        \"latency_ms\": round(ms, 2),\n        \"fps\":     \
+          \   round(fps, 1),\n        \"size_mb\":    round(size, 1),\n    }\n\n \
+          \   # \u2500\u2500 Export ONNX \u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\n    onnx_path = OUTPUT_DIR / \"rtdetr_fp32.onnx\"\
+          \n    print(\"\\nExporting ONNX (opset 17)...\")\n    torch.onnx.export(\n\
+          \        model,\n        {\"pixel_values\": dummy},\n        str(onnx_path),\n\
+          \        opset_version       = 17,\n        input_names         = [\"pixel_values\"\
+          ],\n        output_names        = [\"logits\", \"pred_boxes\"],\n      \
+          \  dynamic_axes        = {\n            \"pixel_values\": {0: \"batch_size\"\
+          },\n            \"logits\":       {0: \"batch_size\"},\n            \"pred_boxes\"\
+          :   {0: \"batch_size\"},\n        },\n        do_constant_folding = True,\n\
+          \    )\n    onnx_size = onnx_path.stat().st_size / (1024 * 1024)\n    print(f\"\
+          ONNX saved: {onnx_size:.1f}MB\")\n\n    # Benchmark ONNX FP32\n    sess\
+          \     = ort.InferenceSession(str(onnx_path), providers=[\"CPUExecutionProvider\"\
+          ])\n    inp_np   = np.random.randn(*DUMMY_SHAPE).astype(np.float32)\n  \
+          \  for _ in range(WARMUP):\n        sess.run(None, {\"pixel_values\": inp_np})\n\
+          \    lats = []\n    for _ in range(BENCH_RUNS):\n        t0 = time.perf_counter()\n\
+          \        sess.run(None, {\"pixel_values\": inp_np})\n        lats.append((time.perf_counter()\
+          \ - t0) * 1000)\n    onnx_ms  = float(np.mean(lats))\n    onnx_fps = 1000.0\
+          \ / onnx_ms\n    print(f\"  ONNX FP32: {onnx_ms:.1f}ms | {onnx_fps:.1f}\
+          \ FPS | {onnx_size:.1f}MB\")\n    results[\"onnx_fp32\"] = {\n        \"\
+          format\":     \"ONNX FP32\",\n        \"latency_ms\": round(onnx_ms, 2),\n\
+          \        \"fps\":        round(onnx_fps, 1),\n        \"size_mb\":    round(onnx_size,\
+          \ 1),\n    }\n\n    # \u2500\u2500 INT8 PTQ \u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    try:\n\
+          \        import torch.quantization as quant\n        model_cpu  = model.cpu()\n\
+          \        model_cpu.eval()\n        model_cpu.qconfig = quant.get_default_qconfig(\"\
+          fbgemm\")\n        prepared   = quant.prepare(model_cpu, inplace=False)\n\
+          \        calibration_dummy = torch.randn(DUMMY_SHAPE)\n        with torch.no_grad():\n\
+          \            for _ in range(20):\n                try:\n               \
+          \     prepared(pixel_values=calibration_dummy)\n                except Exception:\n\
+          \                    pass\n        model_ptq = quant.convert(prepared, inplace=False)\n\
+          \        ms, fps, size = bench_torch(model_ptq, dummy, \"INT8 PTQ\")\n \
+          \       results[\"int8_ptq\"] = {\n            \"format\":     \"INT8 PTQ\"\
+          ,\n            \"latency_ms\": round(ms, 2),\n            \"fps\":     \
+          \   round(fps, 1),\n            \"size_mb\":    round(size, 1),\n      \
+          \  }\n    except Exception as e:\n        print(f\"PTQ skipped: {e}\")\n\
+          \        results[\"int8_ptq\"] = {\"format\": \"INT8 PTQ\", \"error\": str(e)}\n\
+          \n    # \u2500\u2500 Print table \u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\n    print(f\"\\n{'Format':<20} {'Latency(ms)':<14}\
+          \ {'FPS':<10} {'Size(MB)'}\")\n    print(\"-\" * 56)\n    for r in results.values():\n\
+          \        if \"error\" in r:\n            print(f\"{r['format']:<20} SKIPPED:\
+          \ {r['error'][:30]}\")\n        else:\n            print(f\"{r['format']:<20}\
+          \ {r['latency_ms']:<14} \"\n                  f\"{r['fps']:<10} {r['size_mb']}\"\
+          )\n\n    # \u2500\u2500 Upload results \u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\n    bench_path = OUTPUT_DIR / \"benchmark_results.json\"\
+          \n    bench_path.write_text(json.dumps(results, indent=2))\n\n    gcs_out_prefix\
+          \ = \"models/rtdetr_kitti/optimized\"\n    for f in [onnx_path, bench_path]:\n\
+          \        blob = client.bucket(bucket_name).blob(f\"{gcs_out_prefix}/{f.name}\"\
+          )\n        blob.upload_from_filename(str(f))\n        print(f\"Uploaded\
+          \ gs://{bucket_name}/{gcs_out_prefix}/{f.name}\")\n\n    return f\"gs://{bucket_name}/{gcs_out_prefix}\"\
+          \n\n"
+        image: python:3.10-slim
+    exec-train-component:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_component
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'google-cloud-aiplatform>=1.38.0'\
+          \ 'google-cloud-storage>=2.0.0'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_component(\n    project_id:    str,\n    region:      \
+          \  str,\n    bucket_name:   str,\n    gcs_data_path: str,\n    epochs: \
+          \       int,\n    batch_size:    int,\n    lr:            float,\n    dataset_uri:\
+          \   str,\n) -> str:\n    \"\"\"\n    Submit Vertex AI Custom Training Job\
+          \ running training/train.py on a T4 GPU.\n    The training script is fetched\
+          \ from gs://{bucket_name}/scripts/train.py.\n    Returns GCS path to the\
+          \ saved model.\n    \"\"\"\n    import google.cloud.aiplatform as aip\n\
+          \    from datetime import datetime\n\n    aip.init(project=project_id, location=region,\n\
+          \             staging_bucket=f\"gs://{bucket_name}\")\n\n    timestamp =\
+          \ datetime.now().strftime(\"%Y%m%d%H%M%S\")\n    job_name  = f\"rtdetr-kitti-{timestamp}\"\
+          \n\n    train_image = (\n        \"us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest\"\
+          \n    )\n\n    train_cmd = (\n        \"pip install -q transformers>=4.30.0\
+          \ google-cloud-storage Pillow tqdm && \"\n        f\"gsutil cp gs://{bucket_name}/scripts/train.py\
+          \ /tmp/train.py && \"\n        f\"python /tmp/train.py \"\n        f\"--epochs={epochs}\
+          \ \"\n        f\"--batch_size={batch_size} \"\n        f\"--lr={lr} \"\n\
+          \        f\"--bucket_name={bucket_name} \"\n        f\"--gcs_data_path={gcs_data_path}\
+          \ \"\n        \"--output_dir=/tmp/model_output\"\n    )\n\n    worker_pool_specs\
+          \ = [{\n        \"machine_spec\": {\n            \"machine_type\":     \
+          \  \"n1-standard-4\",\n            \"accelerator_type\":   \"NVIDIA_TESLA_T4\"\
+          ,\n            \"accelerator_count\":  1,\n        },\n        \"replica_count\"\
+          : 1,\n        \"container_spec\": {\n            \"image_uri\": train_image,\n\
+          \            \"command\":   [\"bash\", \"-c\"],\n            \"args\": \
+          \     [train_cmd],\n        },\n    }]\n\n    print(f\"Submitting job: {job_name}\"\
+          )\n    job = aip.CustomJob(\n        display_name      = job_name,\n   \
+          \     worker_pool_specs = worker_pool_specs,\n        staging_bucket   \
+          \ = f\"gs://{bucket_name}\",\n    )\n    job.run(sync=True)\n    print(f\"\
+          Job state: {job.state}\")\n\n    model_uri = f\"gs://{bucket_name}/models/rtdetr_kitti\"\
+          \n    print(f\"Model available at: {model_uri}\")\n    return model_uri\n\
+          \n"
+        image: python:3.10-slim
+pipelineInfo:
+  description: 'RT-DETR KITTI: data_prep -> train -> optimize -> monitor'
+  name: kitti-rtdetr-pipeline
+root:
+  dag:
+    tasks:
+      data-prep-component:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-data-prep-component
+        inputs:
+          parameters:
+            bucket_name:
+              componentInputParameter: bucket_name
+            gcs_data_path:
+              componentInputParameter: gcs_data_path
+            num_train:
+              componentInputParameter: num_train
+            num_val:
+              componentInputParameter: num_val
+            project_id:
+              componentInputParameter: project_id
+        taskInfo:
+          name: data-prep-component
+      monitor-component:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-monitor-component
+        dependentTasks:
+        - optimize-component
+        inputs:
+          parameters:
+            baseline_gcs_path:
+              componentInputParameter: baseline_gcs_path
+            bucket_name:
+              componentInputParameter: bucket_name
+            drift_threshold:
+              componentInputParameter: drift_threshold
+            new_data_gcs_path:
+              componentInputParameter: new_data_gcs_path
+            optimize_uri:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: optimize-component
+            project_id:
+              componentInputParameter: project_id
+        taskInfo:
+          name: monitor-component
+      optimize-component:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-optimize-component
+        dependentTasks:
+        - train-component
+        inputs:
+          parameters:
+            bucket_name:
+              componentInputParameter: bucket_name
+            model_uri:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: train-component
+            project_id:
+              componentInputParameter: project_id
+        taskInfo:
+          name: optimize-component
+      train-component:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train-component
+        dependentTasks:
+        - data-prep-component
+        inputs:
+          parameters:
+            batch_size:
+              componentInputParameter: batch_size
+            bucket_name:
+              componentInputParameter: bucket_name
+            dataset_uri:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: data-prep-component
+            epochs:
+              componentInputParameter: epochs
+            gcs_data_path:
+              componentInputParameter: gcs_data_path
+            lr:
+              componentInputParameter: lr
+            project_id:
+              componentInputParameter: project_id
+            region:
+              componentInputParameter: region
+        taskInfo:
+          name: train-component
+  inputDefinitions:
+    parameters:
+      baseline_gcs_path:
+        defaultValue: kitti/images/train
+        isOptional: true
+        parameterType: STRING
+      batch_size:
+        defaultValue: 8.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      bucket_name:
+        defaultValue: mlops-edge-perception-bucket
+        isOptional: true
+        parameterType: STRING
+      drift_threshold:
+        defaultValue: 0.3
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      epochs:
+        defaultValue: 20.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      gcs_data_path:
+        defaultValue: kitti
+        isOptional: true
+        parameterType: STRING
+      lr:
+        defaultValue: 0.0001
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      new_data_gcs_path:
+        defaultValue: kitti/images/val
+        isOptional: true
+        parameterType: STRING
+      num_train:
+        defaultValue: 400.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      num_val:
+        defaultValue: 100.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      project_id:
+        defaultValue: mlops-edge-perception
+        isOptional: true
+        parameterType: STRING
+      region:
+        defaultValue: us-central1
+        isOptional: true
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0
