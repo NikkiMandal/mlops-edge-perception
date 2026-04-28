@@ -276,6 +276,7 @@ def optimize_component(
     import json
     import time
     import torch
+    import gc
     import numpy as np
     import onnxruntime as ort
     from pathlib import Path
@@ -288,8 +289,8 @@ def optimize_component(
 
     MODEL_GCS_PREFIX = model_uri.replace(f"gs://{bucket_name}/", "")
     DUMMY_SHAPE      = (1, 3, 640, 640)
-    WARMUP           = 10
-    BENCH_RUNS       = 50
+    WARMUP           = 5
+    BENCH_RUNS       = 20
 
     # ── Download model ─────────────────────────────────────────────────────────
     print(f"Downloading model from gs://{bucket_name}/{MODEL_GCS_PREFIX}...")
@@ -346,6 +347,8 @@ def optimize_component(
     # ── Export ONNX ────────────────────────────────────────────────────────────
     onnx_path = OUTPUT_DIR / "rtdetr_fp32.onnx"
     print("\nExporting ONNX (opset 17)...")
+    gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
     torch.onnx.export(
         model,
         {"pixel_values": dummy},
@@ -359,6 +362,7 @@ def optimize_component(
             "pred_boxes":   {0: "batch_size"},
         },
         do_constant_folding = True,
+        training            = torch.onnx.TrainingMode.EVAL,
     )
     onnx_size = onnx_path.stat().st_size / (1024 * 1024)
     print(f"ONNX saved: {onnx_size:.1f}MB")
