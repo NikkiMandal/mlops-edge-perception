@@ -259,6 +259,7 @@ def train_component(
         "timm",
         "onnx>=1.14.0",
         "onnxruntime>=1.16.0",
+        "onnxscript",
         "google-cloud-storage>=2.0.0",
         "numpy>=1.24.0",
         "Pillow>=9.0.0",
