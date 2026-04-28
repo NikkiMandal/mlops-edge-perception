@@ -352,9 +352,9 @@ def optimize_component(
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
     torch.onnx.export(
         model,
-        {"pixel_values": dummy},
+        (dummy,),
         str(onnx_path),
-        opset_version       = 17,
+        opset_version       = 12,
         input_names         = ["pixel_values"],
         output_names        = ["logits", "pred_boxes"],
         dynamic_axes        = {
@@ -648,7 +648,7 @@ def submit_pipeline(
         display_name   = f"kitti-rtdetr-{datetime.now().strftime('%Y%m%d%H%M%S')}",
         template_path  = compiled_path,
         pipeline_root  = PIPELINE_ROOT,
-        enable_caching = True,
+        enable_caching = False, #changed to false because it wasn't installing new required packages 
     )
     job.submit()
     print(f"Submitted: {job.resource_name}")

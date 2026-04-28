@@ -339,10 +339,11 @@ deploymentSpec:
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
           \ python3 -m pip install --quiet --no-warn-script-location 'torch>=2.0.0'\
-          \ 'transformers>=4.30.0' 'onnx>=1.14.0' 'onnxruntime>=1.16.0' 'google-cloud-storage>=2.0.0'\
-          \ 'numpy>=1.24.0' 'Pillow>=9.0.0'  &&  python3 -m pip install --quiet --no-warn-script-location\
-          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
-          3.9\"' && \"$0\" \"$@\"\n"
+          \ 'transformers==4.40.0' 'timm' 'onnx>=1.14.0' 'onnxruntime>=1.16.0' 'onnxscript'\
+          \ 'google-cloud-storage>=2.0.0' 'numpy>=1.24.0' 'Pillow>=9.0.0'  &&  python3\
+          \ -m pip install --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps'\
+          \ 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\
+          \n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -358,23 +359,23 @@ deploymentSpec:
           \ str,\n    model_uri:   str,\n) -> str:\n    \"\"\"\n    Download trained\
           \ model, export to ONNX, benchmark FP32/ONNX/INT8-PTQ,\n    upload results\
           \ to GCS. Returns GCS path to optimization outputs.\n    \"\"\"\n    import\
-          \ json\n    import time\n    import torch\n    import numpy as np\n    import\
-          \ onnxruntime as ort\n    from pathlib import Path\n    from transformers\
-          \ import AutoModelForObjectDetection\n    from google.cloud import storage\n\
-          \n    LOCAL_MODEL = Path(\"/tmp/rtdetr_model\")\n    OUTPUT_DIR  = Path(\"\
-          /tmp/optimize_outputs\")\n    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)\n\
-          \n    MODEL_GCS_PREFIX = \"models/rtdetr_kitti/best_model\"\n    DUMMY_SHAPE\
-          \      = (1, 3, 640, 640)\n    WARMUP           = 10\n    BENCH_RUNS   \
-          \    = 50\n\n    # \u2500\u2500 Download model \u2500\u2500\u2500\u2500\u2500\
+          \ json\n    import time\n    import torch\n    import gc\n    import numpy\
+          \ as np\n    import onnxruntime as ort\n    from pathlib import Path\n \
+          \   from transformers import AutoModelForObjectDetection\n    from google.cloud\
+          \ import storage\n\n    LOCAL_MODEL = Path(\"/tmp/rtdetr_model\")\n    OUTPUT_DIR\
+          \  = Path(\"/tmp/optimize_outputs\")\n    OUTPUT_DIR.mkdir(parents=True,\
+          \ exist_ok=True)\n\n    MODEL_GCS_PREFIX = model_uri.replace(f\"gs://{bucket_name}/\"\
+          , \"\")\n    DUMMY_SHAPE      = (1, 3, 640, 640)\n    WARMUP           =\
+          \ 5\n    BENCH_RUNS       = 20\n\n    # \u2500\u2500 Download model \u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\n    print(f\"Downloading model from gs://{bucket_name}/{MODEL_GCS_PREFIX}...\"\
-          )\n    client = storage.Client(project=project_id)\n    bucket = client.bucket(bucket_name)\n\
-          \    blobs  = [b for b in bucket.list_blobs(prefix=MODEL_GCS_PREFIX)\n \
-          \             if not b.name.endswith(\"/\")]\n\n    if not blobs:\n    \
-          \    raise RuntimeError(f\"No model blobs at gs://{bucket_name}/{MODEL_GCS_PREFIX}\"\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    print(f\"Downloading\
+          \ model from gs://{bucket_name}/{MODEL_GCS_PREFIX}...\")\n    client = storage.Client(project=project_id)\n\
+          \    bucket = client.bucket(bucket_name)\n    blobs  = [b for b in bucket.list_blobs(prefix=MODEL_GCS_PREFIX)\n\
+          \              if not b.name.endswith(\"/\")]\n\n    if not blobs:\n   \
+          \     raise RuntimeError(f\"No model blobs at gs://{bucket_name}/{MODEL_GCS_PREFIX}\"\
           )\n\n    LOCAL_MODEL.mkdir(parents=True, exist_ok=True)\n    for blob in\
           \ blobs:\n        rel  = blob.name[len(MODEL_GCS_PREFIX) + 1:]\n       \
           \ dest = LOCAL_MODEL / rel\n        dest.parent.mkdir(parents=True, exist_ok=True)\n\
@@ -405,16 +406,18 @@ deploymentSpec:
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\n    onnx_path = OUTPUT_DIR / \"rtdetr_fp32.onnx\"\
-          \n    print(\"\\nExporting ONNX (opset 17)...\")\n    torch.onnx.export(\n\
-          \        model,\n        {\"pixel_values\": dummy},\n        str(onnx_path),\n\
-          \        opset_version       = 17,\n        input_names         = [\"pixel_values\"\
-          ],\n        output_names        = [\"logits\", \"pred_boxes\"],\n      \
-          \  dynamic_axes        = {\n            \"pixel_values\": {0: \"batch_size\"\
-          },\n            \"logits\":       {0: \"batch_size\"},\n            \"pred_boxes\"\
+          \n    print(\"\\nExporting ONNX (opset 17)...\")\n    gc.collect()\n   \
+          \ torch.cuda.empty_cache() if torch.cuda.is_available() else None\n    torch.onnx.export(\n\
+          \        model,\n        (dummy,),\n        str(onnx_path),\n        opset_version\
+          \       = 12,\n        input_names         = [\"pixel_values\"],\n     \
+          \   output_names        = [\"logits\", \"pred_boxes\"],\n        dynamic_axes\
+          \        = {\n            \"pixel_values\": {0: \"batch_size\"},\n     \
+          \       \"logits\":       {0: \"batch_size\"},\n            \"pred_boxes\"\
           :   {0: \"batch_size\"},\n        },\n        do_constant_folding = True,\n\
-          \    )\n    onnx_size = onnx_path.stat().st_size / (1024 * 1024)\n    print(f\"\
-          ONNX saved: {onnx_size:.1f}MB\")\n\n    # Benchmark ONNX FP32\n    sess\
-          \     = ort.InferenceSession(str(onnx_path), providers=[\"CPUExecutionProvider\"\
+          \        training            = torch.onnx.TrainingMode.EVAL,\n    )\n  \
+          \  onnx_size = onnx_path.stat().st_size / (1024 * 1024)\n    print(f\"ONNX\
+          \ saved: {onnx_size:.1f}MB\")\n\n    # Benchmark ONNX FP32\n    sess   \
+          \  = ort.InferenceSession(str(onnx_path), providers=[\"CPUExecutionProvider\"\
           ])\n    inp_np   = np.random.randn(*DUMMY_SHAPE).astype(np.float32)\n  \
           \  for _ in range(WARMUP):\n        sess.run(None, {\"pixel_values\": inp_np})\n\
           \    lats = []\n    for _ in range(BENCH_RUNS):\n        t0 = time.perf_counter()\n\
@@ -424,47 +427,41 @@ deploymentSpec:
           \ FPS | {onnx_size:.1f}MB\")\n    results[\"onnx_fp32\"] = {\n        \"\
           format\":     \"ONNX FP32\",\n        \"latency_ms\": round(onnx_ms, 2),\n\
           \        \"fps\":        round(onnx_fps, 1),\n        \"size_mb\":    round(onnx_size,\
-          \ 1),\n    }\n\n    # \u2500\u2500 INT8 PTQ \u2500\u2500\u2500\u2500\u2500\
+          \ 1),\n    }\n\n    # \u2500\u2500 INT8 PTQ using ONNX Runtime \u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    try:\n\
-          \        import torch.quantization as quant\n        model_cpu  = model.cpu()\n\
-          \        model_cpu.eval()\n        model_cpu.qconfig = quant.get_default_qconfig(\"\
-          fbgemm\")\n        prepared   = quant.prepare(model_cpu, inplace=False)\n\
-          \        calibration_dummy = torch.randn(DUMMY_SHAPE)\n        with torch.no_grad():\n\
-          \            for _ in range(20):\n                try:\n               \
-          \     prepared(pixel_values=calibration_dummy)\n                except Exception:\n\
-          \                    pass\n        model_ptq = quant.convert(prepared, inplace=False)\n\
-          \        ms, fps, size = bench_torch(model_ptq, dummy, \"INT8 PTQ\")\n \
-          \       results[\"int8_ptq\"] = {\n            \"format\":     \"INT8 PTQ\"\
-          ,\n            \"latency_ms\": round(ms, 2),\n            \"fps\":     \
-          \   round(fps, 1),\n            \"size_mb\":    round(size, 1),\n      \
-          \  }\n    except Exception as e:\n        print(f\"PTQ skipped: {e}\")\n\
-          \        results[\"int8_ptq\"] = {\"format\": \"INT8 PTQ\", \"error\": str(e)}\n\
-          \n    # \u2500\u2500 Print table \u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\n    print(f\"\\n{'Format':<20} {'Latency(ms)':<14}\
-          \ {'FPS':<10} {'Size(MB)'}\")\n    print(\"-\" * 56)\n    for r in results.values():\n\
-          \        if \"error\" in r:\n            print(f\"{r['format']:<20} SKIPPED:\
-          \ {r['error'][:30]}\")\n        else:\n            print(f\"{r['format']:<20}\
-          \ {r['latency_ms']:<14} \"\n                  f\"{r['fps']:<10} {r['size_mb']}\"\
-          )\n\n    # \u2500\u2500 Upload results \u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    try:\n     \
+          \   from onnxruntime.quantization import quantize_dynamic, QuantType\n \
+          \       int8_path = OUTPUT_DIR / \"rtdetr_int8.onnx\"\n        quantize_dynamic(\n\
+          \            model_input  = str(onnx_path),\n            model_output =\
+          \ str(int8_path),\n            weight_type  = QuantType.QInt8,\n       \
+          \ )\n        int8_size = int8_path.stat().st_size / (1024 * 1024)\n    \
+          \    # Benchmark INT8\n        sess_int8 = ort.InferenceSession(str(int8_path),\
+          \ providers=[\"CPUExecutionProvider\"])\n        lats = []\n        for\
+          \ _ in range(BENCH_RUNS):\n            t0 = time.perf_counter()\n      \
+          \      sess_int8.run(None, {\"pixel_values\": inp_np})\n            lats.append((time.perf_counter()\
+          \ - t0) * 1000)\n        int8_ms  = float(np.mean(lats))\n        int8_fps\
+          \ = 1000.0 / int8_ms\n        print(f\"  ONNX INT8: {int8_ms:.1f}ms | {int8_fps:.1f}\
+          \ FPS | {int8_size:.1f}MB\")\n        results[\"int8_ptq\"] = {\n      \
+          \      \"format\":     \"ONNX INT8 PTQ\",\n            \"latency_ms\": round(int8_ms,\
+          \ 2),\n            \"fps\":        round(int8_fps, 1),\n            \"size_mb\"\
+          :    round(int8_size, 1),\n        }\n    except Exception as e:\n     \
+          \   print(f\"INT8 skipped: {e}\")\n        results[\"int8_ptq\"] = {\"format\"\
+          : \"ONNX INT8 PTQ\", \"error\": str(e)}\n\n    # \u2500\u2500 Upload results\
+          \ \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\n    bench_path = OUTPUT_DIR / \"benchmark_results.json\"\
-          \n    bench_path.write_text(json.dumps(results, indent=2))\n\n    gcs_out_prefix\
-          \ = \"models/rtdetr_kitti/optimized\"\n    for f in [onnx_path, bench_path]:\n\
-          \        blob = client.bucket(bucket_name).blob(f\"{gcs_out_prefix}/{f.name}\"\
-          )\n        blob.upload_from_filename(str(f))\n        print(f\"Uploaded\
-          \ gs://{bucket_name}/{gcs_out_prefix}/{f.name}\")\n\n    return f\"gs://{bucket_name}/{gcs_out_prefix}\"\
-          \n\n"
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    bench_path =\
+          \ OUTPUT_DIR / \"benchmark_results.json\"\n    bench_path.write_text(json.dumps(results,\
+          \ indent=2))\n\n    gcs_out_prefix = \"models/rtdetr_kitti/optimized\"\n\
+          \    files_to_upload = [onnx_path, bench_path]\n    if (OUTPUT_DIR / \"\
+          rtdetr_int8.onnx\").exists():\n        files_to_upload.append(OUTPUT_DIR\
+          \ / \"rtdetr_int8.onnx\")\n    for f in files_to_upload:\n        blob =\
+          \ client.bucket(bucket_name).blob(f\"{gcs_out_prefix}/{f.name}\")\n    \
+          \    blob.upload_from_filename(str(f))\n        print(f\"Uploaded gs://{bucket_name}/{gcs_out_prefix}/{f.name}\"\
+          )\n\n    return f\"gs://{bucket_name}/{gcs_out_prefix}\"\n\n"
         image: python:3.10-slim
     exec-train-component:
       container:
@@ -558,6 +555,8 @@ root:
           enableCache: true
         componentRef:
           name: comp-data-prep-component
+        dependentTasks:
+        - autolabel-component
         inputs:
           parameters:
             bucket_name:
