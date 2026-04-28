@@ -8,6 +8,7 @@ import json
 import time
 import torch
 import argparse
+import psutil
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -18,6 +19,17 @@ from transformers import (
 from PIL import Image
 from google.cloud import storage
 import numpy as np
+
+os.environ["PJRT_DEVICE"] = "GPU"
+os.environ["XLA_FLAGS"] = "--xla_force_disable_all_pjrt_local_device_queries"
+os.environ["DISABLE_XLA"] = "1"
+os.environ["USE_TORCH_XLA"] = "0"
+
+
+def log_memory(label=""):
+    process = psutil.Process(os.getpid())
+    ram_mb = process.memory_info().rss / 1024 / 1024
+    print(f"[MEMORY] {label}: {ram_mb:.0f} MB RAM used")
 
 # ── Argument Parser ───────────────────────────────────────────
 # Vertex AI passes hyperparameters as command line arguments
@@ -33,7 +45,9 @@ args = parser.parse_args()
 # ── Configuration ─────────────────────────────────────────────
 PROJECT_ID   = "mlops-edge-perception"
 BUCKET_NAME  = args.bucket_name
-MODEL_NAME   = "PekingU/rtdetr_r50vd_coco_o365"
+#MODEL_NAME   = "PekingU/rtdetr_r50vd_coco_o365"
+#MODEL_NAME = "facebook/detr-resnet-50"
+MODEL_NAME = "hustvl/yolos-tiny"
 CLASSES      = ["Car", "Pedestrian", "Cyclist"]
 NUM_CLASSES  = len(CLASSES)
 DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -145,9 +159,17 @@ class KITTIDataset(Dataset):
         return image, target
 
 
+_processor = None
+
+def get_processor():
+    global _processor
+    if _processor is None:
+        _processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+    return _processor
+
 def collate_fn(batch):
     """Custom collate to handle variable number of boxes per image."""
-    processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+    processor = get_processor()
     images    = [item[0] for item in batch]
     targets   = [item[1] for item in batch]
     encoding  = processor(images=images, annotations=targets, return_tensors="pt")
@@ -160,6 +182,7 @@ def train():
     print("\n=== Downloading data from GCS ===")
     local_data = "/tmp/kitti"
     download_from_gcs(BUCKET_NAME, args.gcs_data_path, local_data)
+    log_memory("after GCS download")
 
     # Step 2 — Create datasets
     print("\n=== Creating datasets ===")
@@ -176,23 +199,27 @@ def train():
         processor  = processor,
     )
 
+    log_memory("after dataset creation")
+
     train_loader = DataLoader(
         train_dataset,
         batch_size  = args.batch_size,
         shuffle     = True,
         collate_fn  = collate_fn,
-        num_workers = 2,
+        num_workers = 0,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size  = args.batch_size,
         shuffle     = False,
         collate_fn  = collate_fn,
-        num_workers = 2,
+        num_workers = 0,
     )
 
+    log_memory("after dataloader creation")
+
     # Step 3 — Load pretrained RT-DETR model
-    print(f"\n=== Loading RT-DETR model ({MODEL_NAME}) ===")
+    print(f"\n=== Loading YOLOS model ({MODEL_NAME}) ===")
     id2label = {i: c for i, c in enumerate(CLASSES)}
     label2id = {c: i for i, c in enumerate(CLASSES)}
 
@@ -203,6 +230,7 @@ def train():
         ignore_mismatched_sizes = True,  # allows head replacement
     )
     model.to(DEVICE)
+    log_memory("after model load")
 
     # Print model parameter count
     total_params = sum(p.numel() for p in model.parameters())
@@ -234,7 +262,14 @@ def train():
         start_time = time.time()
 
         for i, batch in enumerate(train_loader):
-            batch    = {k: v.to(DEVICE) for k, v in batch.items()}
+            if i == 0:
+                log_memory("after first batch")
+            pixel_values = batch["pixel_values"].to(DEVICE)
+            pixel_mask = batch["pixel_mask"].to(DEVICE) if "pixel_mask" in batch else None
+            labels = [{k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in batch["labels"]]
+            batch = {"pixel_values": pixel_values, "labels": labels}
+            if pixel_mask is not None:
+                batch["pixel_mask"] = pixel_mask
             outputs  = model(**batch)
             loss     = outputs.loss
 
@@ -254,7 +289,12 @@ def train():
         val_loss = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                batch    = {k: v.to(DEVICE) for k, v in batch.items()}
+                pixel_values = batch["pixel_values"].to(DEVICE)
+                pixel_mask = batch["pixel_mask"].to(DEVICE) if "pixel_mask" in batch else None
+                labels = [{k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in batch["labels"]]
+                batch = {"pixel_values": pixel_values, "labels": labels}
+                if pixel_mask is not None:
+                    batch["pixel_mask"] = pixel_mask
                 outputs  = model(**batch)
                 val_loss += outputs.loss.item()
 
@@ -309,4 +349,11 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    try:
+        train()
+    except Exception as e:
+        import traceback
+        print(f"\n=== TRAINING FAILED ===")
+        print(f"Error: {e}")
+        traceback.print_exc()
+        raise

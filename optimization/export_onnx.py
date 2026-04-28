@@ -208,40 +208,25 @@ def benchmark_onnx(onnx_path, precision="fp32"):
 
 
 # ── Quantization (PTQ) ────────────────────────────────────────
-def quantize_ptq(model):
+def quantize_ptq_onnx(onnx_path):
     """
-    Post-Training Quantization — INT8.
-    Converts FP32 weights to INT8 AFTER training.
-    Fast but slight accuracy drop (~1-2%).
+    INT8 quantization using ONNX Runtime — works on CPU.
+    More compatible with transformer architectures than PyTorch PTQ.
     """
-    print(f"\n=== Applying PTQ (Post-Training Quantization) ===")
+    from onnxruntime.quantization import quantize_dynamic, QuantType
+    print(f"\n=== Applying ONNX Runtime INT8 Dynamic Quantization ===")
 
-    import torch.quantization as quant
+    output_path = Path(str(onnx_path).replace("fp32", "int8"))
 
-    # Move to CPU for quantization (PyTorch PTQ is CPU-only)
-    model_cpu = model.cpu()
-    model_cpu.eval()
+    quantize_dynamic(
+        model_input  = str(onnx_path),
+        model_output = str(output_path),
+        weight_type  = QuantType.QInt8,
+    )
 
-    # Fuse Conv+BN+ReLU layers for better quantization
-    model_cpu.qconfig = quant.get_default_qconfig("fbgemm")
-
-    # Prepare and calibrate
-    model_prepared = quant.prepare(model_cpu, inplace=False)
-
-    # Run calibration with dummy data (in real scenario use real images)
-    print("  Calibrating with dummy data...")
-    with torch.no_grad():
-        for _ in range(20):
-            dummy = torch.randn(1, 3, 640, 640)
-            try:
-                model_prepared(pixel_values=dummy)
-            except Exception:
-                pass  # Some layers may not support quantization
-
-    # Convert to INT8
-    model_ptq = quant.convert(model_prepared, inplace=False)
-    print("  PTQ conversion complete")
-    return model_ptq
+    size_mb = output_path.stat().st_size / (1024 * 1024)
+    print(f"INT8 model saved: {output_path} ({size_mb:.1f} MB)")
+    return output_path, size_mb
 
 
 # ── Main Benchmark Runner ─────────────────────────────────────
@@ -309,28 +294,23 @@ def run_benchmarks(model):
         "size_mb":         round(size_mb, 1),
     }
 
-    # 4 — PTQ INT8
+    # 4 — ONNX INT8 Dynamic Quantization
     print("\n" + "="*50)
-    print("BENCHMARK 4: PyTorch INT8 PTQ")
+    print("BENCHMARK 4: ONNX INT8 PTQ (Dynamic)")
     print("="*50)
     try:
-        model_ptq  = quantize_ptq(model)
-        mean_ms, p95_ms, fps = benchmark_latency(
-            model_ptq,
-            dummy_input,
-            "INT8 PTQ"
-        )
-        ptq_size = fp32_size / 4
+        int8_path, int8_size = quantize_ptq_onnx(onnx_path)
+        mean_ms, p95_ms, fps, _ = benchmark_onnx(str(int8_path), "fp32")
         results["int8_ptq"] = {
-            "format":          "INT8 PTQ",
+            "format":          "ONNX INT8 PTQ",
             "mean_latency_ms": round(mean_ms, 2),
             "p95_latency_ms":  round(p95_ms, 2),
             "fps":             round(fps, 1),
-            "size_mb":         round(ptq_size, 1),
+            "size_mb":         round(int8_size, 1),
         }
     except Exception as e:
-        print(f"  PTQ failed: {e}")
-        results["int8_ptq"] = {"format": "INT8 PTQ", "note": str(e)}
+        print(f"  INT8 failed: {e}")
+        results["int8_ptq"] = {"format": "ONNX INT8 PTQ", "note": str(e)[:50]}
 
     return results
 

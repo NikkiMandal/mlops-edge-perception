@@ -21,6 +21,7 @@ MACHINE_TYPE      = "n1-standard-4"
 ACCELERATOR_TYPE  = "NVIDIA_TESLA_T4"
 ACCELERATOR_COUNT = 1
 
+
 # Pre-built PyTorch container from Google
 # This has PyTorch + CUDA already installed — no Docker needed
 TRAIN_IMAGE = "us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest"
@@ -28,7 +29,7 @@ TRAIN_IMAGE = "us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest
 # Training hyperparameters
 ARGS = [
     "--epochs",        "20",
-    "--batch_size",    "8",
+    "--batch_size",    "4",
     "--lr",            "1e-4",
     "--bucket_name",   BUCKET_NAME,
     "--gcs_data_path", "kitti",
@@ -55,11 +56,15 @@ def submit_training_job():
         display_name   = JOB_NAME,
         script_path    = "training/train.py",
         container_uri  = TRAIN_IMAGE,
-        requirements   = [
-            "transformers>=4.30.0",
+        requirements = [
+            "transformers==4.40.0",
+            "torchvision>=0.15.0",
+            "timm",
+            "psutil",
             "google-cloud-storage",
             "Pillow",
             "tqdm",
+            "numpy",
         ],
     )
 

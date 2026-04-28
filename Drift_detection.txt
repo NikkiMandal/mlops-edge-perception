@@ -1,0 +1,67 @@
+(venv) PS C:\Users\nikit\projects\mlops-edge-perception> python monitoring/drift_detect.py
+=== Drift Detection Pipeline ===
+Baseline: gs://mlops-edge-perception-bucket/kitti/images/train
+New data: gs://mlops-edge-perception-bucket/kitti/images/val_drifted
+Threshold: 30%
+
+Downloading 100 samples from gs://mlops-edge-perception-bucket/kitti/images/train
+Downloaded 100 images to \tmp\drift\baseline
+
+Downloading 100 samples from gs://mlops-edge-perception-bucket/kitti/images/val_drifted
+Downloaded 100 images to \tmp\drift\new_data
+
+Extracting features from \tmp\drift\baseline...
+Extracted 100 feature vectors (13 features each)
+
+Extracting features from \tmp\drift\new_data...
+Extracted 100 feature vectors (13 features each)
+
+=== Running Evidently Drift Detection ===
+C:\Users\nikit\projects\mlops-edge-perception\venv\Lib\site-packages\numpy\lib\_function_base_impl.py:3023: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[:, None]
+C:\Users\nikit\projects\mlops-edge-perception\venv\Lib\site-packages\numpy\lib\_function_base_impl.py:3024: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[None, :]
+C:\Users\nikit\projects\mlops-edge-perception\venv\Lib\site-packages\numpy\lib\_function_base_impl.py:3023: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[:, None]
+C:\Users\nikit\projects\mlops-edge-perception\venv\Lib\site-packages\numpy\lib\_function_base_impl.py:3024: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[None, :]
+C:\Users\nikit\projects\mlops-edge-perception\venv\Lib\site-packages\numpy\lib\_function_base_impl.py:3023: RuntimeWarning:
+
+invalid value encountered in divide
+
+C:\Users\nikit\projects\mlops-edge-perception\venv\Lib\site-packages\numpy\lib\_function_base_impl.py:3024: RuntimeWarning:
+
+invalid value encountered in divide
+
+C:\Users\nikit\projects\mlops-edge-perception\venv\Lib\site-packages\numpy\lib\_function_base_impl.py:3023: RuntimeWarning:
+
+invalid value encountered in divide
+
+C:\Users\nikit\projects\mlops-edge-perception\venv\Lib\site-packages\numpy\lib\_function_base_impl.py:3024: RuntimeWarning:
+
+invalid value encountered in divide
+
+Total features:   13
+Drifted features: 13
+Drift share:      100.0%
+Drift detected:   True
+Threshold:        30%
+JSON summary saved: monitoring\reports\drift_summary_20260427_204122.json
+
+Uploading reports to GCS...
+Uploaded: drift_summary_20260425_225947.json
+Uploaded: drift_summary_20260427_201443.json
+Uploaded: drift_summary_20260427_202557.json
+Uploaded: drift_summary_20260427_203337.json
+Uploaded: drift_summary_20260427_204122.json
+
+DRIFT THRESHOLD EXCEEDED — Triggering retraining
+   Drift share: 100.0% > threshold 30%
+   Trigger file written: monitoring\retrain_trigger.json
+   In production: this would submit a new Vertex AI training job
+
+=== Drift Detection Complete ===
+Drift detected:  True
+Drift share:     100.0%
+Retrain triggered: True
+(venv) PS C:\Users\nikit\projects\mlops-edge-perception>

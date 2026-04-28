@@ -19,7 +19,7 @@ from PIL import Image
 PROJECT_ID        = "mlops-edge-perception"
 BUCKET_NAME       = "mlops-edge-perception-bucket"
 BASELINE_GCS_PATH = "kitti/images/train"   # training images
-NEW_DATA_GCS_PATH = "kitti/images/val"     # simulates new production data
+NEW_DATA_GCS_PATH = "kitti/images/val_drifted"     # simulates new production data
 LOCAL_BASELINE    = Path("/tmp/drift/baseline")
 LOCAL_NEW_DATA    = Path("/tmp/drift/new_data")
 REPORTS_DIR       = Path("monitoring/reports")
@@ -48,8 +48,7 @@ def download_sample_from_gcs(gcs_prefix, local_dir, num_samples):
     for blob in img_blobs:
         filename   = Path(blob.name).name
         local_path = local_dir / filename
-        if not local_path.exists():
-            blob.download_to_filename(str(local_path))
+        blob.download_to_filename(str(local_path))
 
     print(f"Downloaded {len(img_blobs)} images to {local_dir}")
     return len(img_blobs)
@@ -114,31 +113,38 @@ def extract_image_features(image_dir):
 
 # ── Drift Detection ───────────────────────────────────────────
 def detect_drift(baseline_df, new_data_df):
-    """
-    Run Evidently drift detection.
-    Compares new data distribution against baseline.
-    """
     print("\n=== Running Evidently Drift Detection ===")
 
-    # Wrap dataframes in Evidently Dataset format
     baseline_dataset = Dataset.from_pandas(baseline_df)
-    new_data_dataset  = Dataset.from_pandas(new_data_df)
+    new_data_dataset = Dataset.from_pandas(new_data_df)
 
-    # Build and run report
-    report = Report([DataDriftPreset()])
+    report  = Report([DataDriftPreset()])
     my_eval = report.run(
         reference_data = baseline_dataset,
         current_data   = new_data_dataset,
     )
 
-    # Extract results
-    results       = my_eval.dict()
-    drift_share   = results.get("drift_share", 0.0)
+    results = my_eval.dict()
+
+    # Count columns where K-S p-value < 0.05 (statistically drifted)
+    total_cols   = len(baseline_df.columns)
+    drifted_cols = 0
+
+    for metric in results.get("metrics", []):
+        name = metric.get("metric_name", "")
+        if "ValueDrift" in name:
+            p_value = float(metric["value"])
+            if p_value < 0.05:  # statistically significant drift
+                drifted_cols += 1
+
+    drift_share    = drifted_cols / total_cols if total_cols > 0 else 0.0
     drift_detected = drift_share > DRIFT_THRESHOLD
 
-    print(f"Drift share:     {drift_share*100:.1f}%")
-    print(f"Drift detected:  {drift_detected}")
-    print(f"Threshold:       {DRIFT_THRESHOLD*100:.0f}%")
+    print(f"Total features:   {total_cols}")
+    print(f"Drifted features: {drifted_cols}")
+    print(f"Drift share:      {drift_share*100:.1f}%")
+    print(f"Drift detected:   {drift_detected}")
+    print(f"Threshold:        {DRIFT_THRESHOLD*100:.0f}%")
 
     return my_eval, drift_detected, drift_share
 

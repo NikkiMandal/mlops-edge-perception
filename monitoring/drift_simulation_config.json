@@ -1,0 +1,11 @@
+{
+  "drift_type": "combined (lighting + fog + blur)",
+  "num_images": 100,
+  "original_path": "gs://mlops-edge-perception-bucket/kitti/images/val",
+  "drifted_path": "gs://mlops-edge-perception-bucket/kitti/images/val_drifted",
+  "transformations": [
+    "brightness x2.5 (lighting change)",
+    "fog blend alpha=0.5 (weather)",
+    "gaussian blur radius=3 (motion/focus)"
+  ]
+}

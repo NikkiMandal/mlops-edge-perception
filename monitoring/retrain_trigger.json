@@ -1,0 +1,6 @@
+{
+  "trigger": true,
+  "timestamp": "20260427_204122",
+  "reason": "data_drift",
+  "drift_share": 1.0
+}
