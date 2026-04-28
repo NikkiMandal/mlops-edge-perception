@@ -8,20 +8,15 @@ unusual object counts to control API costs.
 import os
 import json
 import base64
-from urllib import response
-#import google.generativeai as genai
-from google import genai
-from google.genai import types
 
 import anthropic
 
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
-import io
+from PIL import Image, ImageDraw
 
 # ── Configuration ─────────────────────────────────────────────
-GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY")
-MODEL_NAME = "gemini-2.0-flash"  # cheapest, fast enough
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+MODEL_NAME = "claude-opus-4-5"  # cheapest, fast enough
 CONFIDENCE_THRESH = 0.5   # flag if avg confidence drops below this
 MAX_OBJECTS_THRESH = 10   # flag if more than this many objects detected
 CLASSES           = ["Car", "Pedestrian", "Cyclist"]
@@ -143,12 +138,6 @@ Analyze this traffic scene and provide:
 
 Be specific and concise. Focus on safety-relevant observations."""
 
-    # Call Gemini with image
-    image_data = {
-        "mime_type": "image/jpeg",
-        "data": image_to_base64(image_path)
-    }
-
     #response = model.generate_content([prompt, image_data])
     #response_text = response.text
 
@@ -162,7 +151,7 @@ Be specific and concise. Focus on safety-relevant observations."""
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": "image/jpeg",
+                        "media_type": "image/png",
                         "data": image_to_base64(image_path)
                     }
                 },
@@ -197,11 +186,7 @@ def test_with_sample():
     """
     print("=== VLM Anomaly Layer Test ===")
     print(f"Model: {MODEL_NAME}")
-    print(f"API Key: {'✓ Set' if GEMINI_API_KEY else '✗ NOT SET'}\n")
-
-    if not GEMINI_API_KEY:
-        print("ERROR: Set GEMINI_API_KEY environment variable first")
-        return
+    print(f"API Key: {'✓ Set' if os.environ.get('ANTHROPIC_API_KEY') else '✗ NOT SET'}\n")
 
     # Find a sample image from local KITTI data
     sample_dirs = [

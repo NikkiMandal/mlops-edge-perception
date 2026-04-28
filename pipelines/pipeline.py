@@ -23,12 +23,7 @@ TRAIN_IMAGE = "us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest
 # ── Component 1: Data Preparation ─────────────────────────────────────────────
 @dsl.component(
     base_image="python:3.10-slim",
-    packages_to_install=[
-        "google-cloud-storage>=2.0.0",
-        "datasets>=2.0.0",
-        "Pillow>=9.0.0",
-        "tqdm>=4.0.0",
-    ],
+    packages_to_install=["google-cloud-storage>=2.0.0"],
 )
 def data_prep_component(
     project_id: str,
@@ -38,102 +33,25 @@ def data_prep_component(
     num_val: int,
 ) -> str:
     """
-    Download KITTI from HuggingFace, convert to YOLO format, upload to GCS.
-    Skips if data already exists in GCS. Returns the GCS dataset URI.
+    Verify KITTI data exists in GCS.
+    Data was pre-uploaded via prepare_dataset.py.
     """
-    import json
-    from pathlib import Path
-    from datasets import load_dataset
     from google.cloud import storage
-    from tqdm import tqdm
 
-    LOCAL_DIR = Path("/tmp/kitti_processed")
-    CLASSES = {"Car": 0, "Pedestrian": 1, "Cyclist": 2}
+    client = storage.Client(project=project_id)
+    blobs  = list(client.bucket(bucket_name).list_blobs(
+        prefix=f"{gcs_data_path}/images/train", max_results=5
+    ))
 
-    def check_exists() -> bool:
-        client = storage.Client(project=project_id)
-        blobs  = list(client.bucket(bucket_name).list_blobs(
-            prefix=f"{gcs_data_path}/images/train", max_results=5
-        ))
-        return len(blobs) > 0
-
-    def upload_file(local_path: Path, gcs_path: str) -> None:
-        client = storage.Client(project=project_id)
-        client.bucket(bucket_name).blob(gcs_path).upload_from_filename(
-            str(local_path)
+    if len(blobs) == 0:
+        raise RuntimeError(
+            f"No data found at gs://{bucket_name}/{gcs_data_path}. "
+            f"Run data/prepare_dataset.py first."
         )
 
-    def convert_to_yolo(sample: dict, w: int, h: int) -> list:
-        lines = []
-        for obj in sample.get("label", []):
-            cls_name = obj.get("type", "")
-            if cls_name not in CLASSES:
-                continue
-            x1, y1, x2, y2 = obj["bbox"]
-            bw = (x2 - x1) / w
-            bh = (y2 - y1) / h
-            if bw <= 0 or bh <= 0:
-                continue
-            cx = (x1 + x2) / 2 / w
-            cy = (y1 + y2) / 2 / h
-            lines.append(
-                f"{CLASSES[cls_name]} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
-            )
-        return lines
-
-    if check_exists():
-        print(f"Data already at gs://{bucket_name}/{gcs_data_path} — skipping")
-        return f"gs://{bucket_name}/{gcs_data_path}"
-
-    print("Loading KITTI from HuggingFace (nateraw/kitti)...")
-    dataset = load_dataset("nateraw/kitti", split="train")
-
-    splits = {
-        "train": range(0, num_train),
-        "val":   range(num_train, num_train + num_val),
-    }
-
-    for split, idx_range in splits.items():
-        img_dir = LOCAL_DIR / "images" / split
-        lbl_dir = LOCAL_DIR / "labels" / split
-        img_dir.mkdir(parents=True, exist_ok=True)
-        lbl_dir.mkdir(parents=True, exist_ok=True)
-
-        saved = 0
-        for idx in tqdm(idx_range, desc=f"Processing {split}"):
-            sample = dataset[idx]
-            img    = sample["image"].convert("RGB")
-            w, h   = img.size
-
-            yolo_lines = convert_to_yolo(sample, w, h)
-            if not yolo_lines:
-                continue
-
-            stem = f"{idx:06d}"
-            img.save(str(img_dir / f"{stem}.png"))
-            (lbl_dir / f"{stem}.txt").write_text("\n".join(yolo_lines))
-            saved += 1
-
-        print(f"  {split}: {saved} samples saved")
-
-    config = {
-        "classes": list(CLASSES.keys()),
-        "num_classes": len(CLASSES),
-        "gcs_path": f"gs://{bucket_name}/{gcs_data_path}",
-    }
-    cfg_path = LOCAL_DIR / "dataset_config.json"
-    cfg_path.write_text(json.dumps(config, indent=2))
-
-    all_files = [f for f in LOCAL_DIR.rglob("*") if f.is_file()]
-    print(f"Uploading {len(all_files)} files to GCS...")
-    for local_file in tqdm(all_files, desc="Uploading"):
-        rel      = local_file.relative_to(LOCAL_DIR)
-        gcs_path = f"{gcs_data_path}/{rel}".replace("\\", "/")
-        upload_file(local_file, gcs_path)
-
-    gcs_uri = f"gs://{bucket_name}/{gcs_data_path}"
-    print(f"Dataset ready at {gcs_uri}")
-    return gcs_uri
+    print(f"Data verified at gs://{bucket_name}/{gcs_data_path}")
+    print(f"Found {len(blobs)}+ files")
+    return f"gs://{bucket_name}/{gcs_data_path}"
 
 
 # ── Component 2: Training ──────────────────────────────────────────────────────
@@ -173,8 +91,10 @@ def train_component(
     )
 
     train_cmd = (
-        "pip install -q transformers>=4.30.0 google-cloud-storage Pillow tqdm && "
+        "pip install -q transformers==4.40.0 torchvision>=0.15.0 timm "
+        "google-cloud-storage Pillow tqdm psutil numpy && "
         f"gsutil cp gs://{bucket_name}/scripts/train.py /tmp/train.py && "
+        "PJRT_DEVICE=GPU DISABLE_XLA=1 USE_TORCH_XLA=0 "
         f"python /tmp/train.py "
         f"--epochs={epochs} "
         f"--batch_size={batch_size} "
