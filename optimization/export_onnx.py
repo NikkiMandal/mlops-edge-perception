@@ -14,6 +14,10 @@ from transformers import AutoImageProcessor, AutoModelForObjectDetection
 from google.cloud import storage
 from PIL import Image
 
+os.environ["PJRT_DEVICE"] = "GPU"
+os.environ["DISABLE_XLA"] = "1"
+os.environ["USE_TORCH_XLA"] = "0"
+
 # ── Configuration ─────────────────────────────────────────────
 PROJECT_ID      = "mlops-edge-perception"
 BUCKET_NAME     = "mlops-edge-perception-bucket"
@@ -259,25 +263,30 @@ def run_benchmarks(model):
     print("BENCHMARK 2: PyTorch FP16")
     print("="*50)
     if DEVICE.type == "cuda":
-        model_fp16 = model.half()
-        dummy_fp16 = dummy_input.half()
-        mean_ms, p95_ms, fps = benchmark_latency(
-            model_fp16, dummy_fp16, "FP16"
-        )
-        fp16_size = fp32_size / 2
-        results["pytorch_fp16"] = {
-            "format":          "PyTorch FP16",
-            "mean_latency_ms": round(mean_ms, 2),
-            "p95_latency_ms":  round(p95_ms, 2),
-            "fps":             round(fps, 1),
-            "size_mb":         round(fp16_size, 1),
+        try:
+            # Reload model fresh in FP16 to avoid mixed precision issues
+            model_fp16 = AutoModelForObjectDetection.from_pretrained(
+                str(LOCAL_MODEL_DIR),
+                torch_dtype=torch.float16
+            )
+            model_fp16.eval()
+            model_fp16.to(DEVICE)
+            dummy_fp16 = torch.randn(DUMMY_INPUT_SIZE, dtype=torch.float16).to(DEVICE)
+            mean_ms, p95_ms, fps = benchmark_latency(model_fp16, dummy_fp16, "FP16")
+            fp16_size = fp32_size / 2
+            results["pytorch_fp16"] = {
+                "format":          "PyTorch FP16",
+                "mean_latency_ms": round(mean_ms, 2),
+                "p95_latency_ms":  round(p95_ms, 2),
+                "fps":             round(fps, 1),
+                "size_mb":         round(fp16_size, 1),
         }
+        except Exception as e:
+            print(f"  FP16 failed: {e}")
+            results["pytorch_fp16"] = {"format": "PyTorch FP16", "note": str(e)[:50]}
     else:
         print("  Skipping FP16 — requires CUDA GPU")
-        results["pytorch_fp16"] = {
-            "format": "PyTorch FP16",
-            "note":   "Requires CUDA GPU"
-        }
+        results["pytorch_fp16"] = {"format": "PyTorch FP16", "note": "Requires CUDA GPU"}
 
     # 3 — ONNX FP32
     print("\n" + "="*50)
@@ -352,6 +361,11 @@ def main():
     print("=== RT-DETR Optimization Benchmark ===")
     print(f"Will benchmark: FP32 → FP16 → ONNX FP32 → INT8 PTQ")
 
+    global OUTPUT_DIR
+    if not Path("optimization").exists():
+        OUTPUT_DIR = Path("/tmp/optimization_outputs")
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     # Download model from GCS
     download_model_from_gcs()
 
@@ -370,6 +384,18 @@ def main():
     print("\n=== Done ===")
     print("Run this script again after GPU training for full results")
     print("including FP16 and TensorRT INT8 numbers.")
+
+    # Upload results to GCS
+    print("\n=== Uploading results to GCS ===")
+    client = storage.Client(project=PROJECT_ID)
+    bucket = client.bucket(BUCKET_NAME)
+    for f in OUTPUT_DIR.glob("*"):
+        if f.is_file():
+            blob = bucket.blob(f"optimization/{f.name}")
+            blob.upload_from_filename(str(f))
+            print(f"Uploaded: {f.name}")
+
+    print("\n=== Done ===")
 
 
 if __name__ == "__main__":
