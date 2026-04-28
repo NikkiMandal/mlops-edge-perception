@@ -225,3 +225,7 @@ data/kitti_processed/
 monitoring/reports/
 optimization/outputs/
 /tmp/
+weights/
+groundingdino/
+
+github-sa-key.json/

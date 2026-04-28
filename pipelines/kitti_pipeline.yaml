@@ -2,6 +2,7 @@
 # Name: kitti-rtdetr-pipeline
 # Description: RT-DETR KITTI: data_prep -> train -> optimize -> monitor
 # Inputs:
+#    autolabel_samples: int [Default: 50.0]
 #    baseline_gcs_path: str [Default: 'kitti/images/train']
 #    batch_size: int [Default: 8.0]
 #    bucket_name: str [Default: 'mlops-edge-perception-bucket']
@@ -14,7 +15,28 @@
 #    num_val: int [Default: 100.0]
 #    project_id: str [Default: 'mlops-edge-perception']
 #    region: str [Default: 'us-central1']
+#    unlabeled_path: str [Default: 'kitti/images/val']
 components:
+  comp-autolabel-component:
+    executorLabel: exec-autolabel-component
+    inputDefinitions:
+      parameters:
+        box_threshold:
+          parameterType: NUMBER_DOUBLE
+        bucket_name:
+          parameterType: STRING
+        num_samples:
+          parameterType: NUMBER_INTEGER
+        output_gcs_path:
+          parameterType: STRING
+        project_id:
+          parameterType: STRING
+        unlabeled_path:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
   comp-data-prep-component:
     executorLabel: exec-data-prep-component
     inputDefinitions:
@@ -93,6 +115,90 @@ components:
           parameterType: STRING
 deploymentSpec:
   executors:
+    exec-autolabel-component:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - autolabel_component
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'google-cloud-storage>=2.0.0'\
+          \ 'Pillow>=9.0.0' 'tqdm>=4.0.0' 'transformers>=4.40.0' 'torch>=2.0.0' 'timm>=0.9.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef autolabel_component(\n    project_id:      str,\n    bucket_name:\
+          \     str,\n    unlabeled_path:  str,\n    output_gcs_path: str,\n    num_samples:\
+          \     int,\n    box_threshold:   float,\n) -> str:\n    \"\"\"\n    Stage\
+          \ 1: Auto-label unlabeled images using Grounding DINO.\n    Uses open-vocabulary\
+          \ detection with text prompts.\n    Returns GCS path to auto-labeled outputs.\n\
+          \    \"\"\"\n    import json\n    import torch\n    from pathlib import\
+          \ Path\n    from PIL import Image, ImageDraw\n    from google.cloud import\
+          \ storage\n    from tqdm import tqdm\n    from transformers import AutoProcessor,\
+          \ AutoModelForZeroShotObjectDetection\n\n    LOCAL_IMAGES = Path(\"/tmp/autolabel/images\"\
+          )\n    LOCAL_OUTPUT = Path(\"/tmp/autolabel/outputs\")\n    TEXT_PROMPTS\
+          \ = \"car . pedestrian . cyclist .\"\n    CLASSES      = {\"car\": 0, \"\
+          pedestrian\": 1, \"cyclist\": 2}\n\n    # Download images\n    client  \
+          \  = storage.Client(project=project_id)\n    bucket    = client.bucket(bucket_name)\n\
+          \    blobs     = [b for b in bucket.list_blobs(prefix=unlabeled_path)\n\
+          \                 if b.name.endswith(\".png\")][:num_samples]\n    LOCAL_IMAGES.mkdir(parents=True,\
+          \ exist_ok=True)\n    for blob in blobs:\n        blob.download_to_filename(str(LOCAL_IMAGES\
+          \ / Path(blob.name).name))\n    print(f\"Downloaded {len(blobs)} images\"\
+          )\n\n    # Load Grounding DINO\n    model_id  = \"IDEA-Research/grounding-dino-tiny\"\
+          \n    processor = AutoProcessor.from_pretrained(model_id)\n    model   \
+          \  = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)\n   \
+          \ model.eval()\n    print(\"Grounding DINO loaded\")\n\n    # Auto-label\n\
+          \    labels_dir = LOCAL_OUTPUT / \"labels\"\n    viz_dir    = LOCAL_OUTPUT\
+          \ / \"visualizations\"\n    labels_dir.mkdir(parents=True, exist_ok=True)\n\
+          \    viz_dir.mkdir(parents=True, exist_ok=True)\n\n    stats = {\"total\"\
+          : 0, \"labeled\": 0, \"boxes\": 0}\n\n    for img_path in sorted(LOCAL_IMAGES.glob(\"\
+          *.png\")):\n        stats[\"total\"] += 1\n        try:\n            img_pil\
+          \ = Image.open(img_path).convert(\"RGB\")\n            w, h    = img_pil.size\n\
+          \            inputs  = processor(\n                images=img_pil,\n   \
+          \             text=TEXT_PROMPTS,\n                return_tensors=\"pt\"\n\
+          \            )\n            with torch.no_grad():\n                outputs\
+          \ = model(**inputs)\n\n            results = processor.post_process_grounded_object_detection(\n\
+          \                outputs,\n                threshold=box_threshold,\n  \
+          \              target_sizes=[(h, w)]\n            )[0]\n\n            boxes\
+          \  = results[\"boxes\"].tolist()\n            labels = results.get(\"text_labels\"\
+          , results.get(\"labels\", []))\n            yolo_lines = []\n          \
+          \  for box, label in zip(boxes, labels):\n                label_str = label\
+          \ if isinstance(label, str) else str(label)\n                class_id  =\
+          \ CLASSES.get(label_str.lower().strip(), -1)\n                if class_id\
+          \ == -1:\n                    continue\n                x1, y1, x2, y2 =\
+          \ box\n                cx = (x1 + x2) / 2 / w\n                cy = (y1\
+          \ + y2) / 2 / h\n                bw = (x2 - x1) / w\n                bh\
+          \ = (y2 - y1) / h\n                if bw > 0 and bh > 0:\n             \
+          \       yolo_lines.append(\n                        f\"{class_id} {cx:.6f}\
+          \ {cy:.6f} {bw:.6f} {bh:.6f}\"\n                    )\n\n            if\
+          \ yolo_lines:\n                (labels_dir / img_path.with_suffix(\".txt\"\
+          ).name).write_text(\n                    \"\\n\".join(yolo_lines)\n    \
+          \            )\n                stats[\"labeled\"] += 1\n              \
+          \  stats[\"boxes\"]   += len(yolo_lines)\n\n        except Exception as\
+          \ e:\n            print(f\"Error on {img_path.name}: {e}\")\n\n    print(f\"\
+          Labeled {stats['labeled']}/{stats['total']} images, \"\n          f\"{stats['boxes']}\
+          \ boxes\")\n\n    # Upload to GCS\n    for f in LOCAL_OUTPUT.rglob(\"*\"\
+          ):\n        if f.is_file():\n            rel = f.relative_to(LOCAL_OUTPUT)\n\
+          \            bucket.blob(\n                f\"{output_gcs_path}/{rel}\"\
+          .replace(\"\\\\\", \"/\")\n            ).upload_from_filename(str(f))\n\n\
+          \    return f\"gs://{bucket_name}/{output_gcs_path}\"\n\n"
+        image: python:3.10-slim
     exec-data-prep-component:
       container:
         args:
@@ -106,9 +212,9 @@ deploymentSpec:
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
           \ python3 -m pip install --quiet --no-warn-script-location 'google-cloud-storage>=2.0.0'\
-          \ 'datasets>=2.0.0' 'Pillow>=9.0.0' 'tqdm>=4.0.0'  &&  python3 -m pip install\
-          \ --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5;\
-          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -122,53 +228,16 @@ deploymentSpec:
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef data_prep_component(\n    project_id: str,\n    bucket_name:\
           \ str,\n    gcs_data_path: str,\n    num_train: int,\n    num_val: int,\n\
-          ) -> str:\n    \"\"\"\n    Download KITTI from HuggingFace, convert to YOLO\
-          \ format, upload to GCS.\n    Skips if data already exists in GCS. Returns\
-          \ the GCS dataset URI.\n    \"\"\"\n    import json\n    from pathlib import\
-          \ Path\n    from datasets import load_dataset\n    from google.cloud import\
-          \ storage\n    from tqdm import tqdm\n\n    LOCAL_DIR = Path(\"/tmp/kitti_processed\"\
-          )\n    CLASSES = {\"Car\": 0, \"Pedestrian\": 1, \"Cyclist\": 2}\n\n   \
-          \ def check_exists() -> bool:\n        client = storage.Client(project=project_id)\n\
-          \        blobs  = list(client.bucket(bucket_name).list_blobs(\n        \
-          \    prefix=f\"{gcs_data_path}/images/train\", max_results=5\n        ))\n\
-          \        return len(blobs) > 0\n\n    def upload_file(local_path: Path,\
-          \ gcs_path: str) -> None:\n        client = storage.Client(project=project_id)\n\
-          \        client.bucket(bucket_name).blob(gcs_path).upload_from_filename(\n\
-          \            str(local_path)\n        )\n\n    def convert_to_yolo(sample:\
-          \ dict, w: int, h: int) -> list:\n        lines = []\n        for obj in\
-          \ sample.get(\"label\", []):\n            cls_name = obj.get(\"type\", \"\
-          \")\n            if cls_name not in CLASSES:\n                continue\n\
-          \            x1, y1, x2, y2 = obj[\"bbox\"]\n            bw = (x2 - x1)\
-          \ / w\n            bh = (y2 - y1) / h\n            if bw <= 0 or bh <= 0:\n\
-          \                continue\n            cx = (x1 + x2) / 2 / w\n        \
-          \    cy = (y1 + y2) / 2 / h\n            lines.append(\n               \
-          \ f\"{CLASSES[cls_name]} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\"\n       \
-          \     )\n        return lines\n\n    if check_exists():\n        print(f\"\
-          Data already at gs://{bucket_name}/{gcs_data_path} \u2014 skipping\")\n\
-          \        return f\"gs://{bucket_name}/{gcs_data_path}\"\n\n    print(\"\
-          Loading KITTI from HuggingFace (nateraw/kitti)...\")\n    dataset = load_dataset(\"\
-          nateraw/kitti\", split=\"train\")\n\n    splits = {\n        \"train\":\
-          \ range(0, num_train),\n        \"val\":   range(num_train, num_train +\
-          \ num_val),\n    }\n\n    for split, idx_range in splits.items():\n    \
-          \    img_dir = LOCAL_DIR / \"images\" / split\n        lbl_dir = LOCAL_DIR\
-          \ / \"labels\" / split\n        img_dir.mkdir(parents=True, exist_ok=True)\n\
-          \        lbl_dir.mkdir(parents=True, exist_ok=True)\n\n        saved = 0\n\
-          \        for idx in tqdm(idx_range, desc=f\"Processing {split}\"):\n   \
-          \         sample = dataset[idx]\n            img    = sample[\"image\"].convert(\"\
-          RGB\")\n            w, h   = img.size\n\n            yolo_lines = convert_to_yolo(sample,\
-          \ w, h)\n            if not yolo_lines:\n                continue\n\n  \
-          \          stem = f\"{idx:06d}\"\n            img.save(str(img_dir / f\"\
-          {stem}.png\"))\n            (lbl_dir / f\"{stem}.txt\").write_text(\"\\\
-          n\".join(yolo_lines))\n            saved += 1\n\n        print(f\"  {split}:\
-          \ {saved} samples saved\")\n\n    config = {\n        \"classes\": list(CLASSES.keys()),\n\
-          \        \"num_classes\": len(CLASSES),\n        \"gcs_path\": f\"gs://{bucket_name}/{gcs_data_path}\"\
-          ,\n    }\n    cfg_path = LOCAL_DIR / \"dataset_config.json\"\n    cfg_path.write_text(json.dumps(config,\
-          \ indent=2))\n\n    all_files = [f for f in LOCAL_DIR.rglob(\"*\") if f.is_file()]\n\
-          \    print(f\"Uploading {len(all_files)} files to GCS...\")\n    for local_file\
-          \ in tqdm(all_files, desc=\"Uploading\"):\n        rel      = local_file.relative_to(LOCAL_DIR)\n\
-          \        gcs_path = f\"{gcs_data_path}/{rel}\".replace(\"\\\\\", \"/\")\n\
-          \        upload_file(local_file, gcs_path)\n\n    gcs_uri = f\"gs://{bucket_name}/{gcs_data_path}\"\
-          \n    print(f\"Dataset ready at {gcs_uri}\")\n    return gcs_uri\n\n"
+          ) -> str:\n    \"\"\"\n    Verify KITTI data exists in GCS.\n    Data was\
+          \ pre-uploaded via prepare_dataset.py.\n    \"\"\"\n    from google.cloud\
+          \ import storage\n\n    client = storage.Client(project=project_id)\n  \
+          \  blobs  = list(client.bucket(bucket_name).list_blobs(\n        prefix=f\"\
+          {gcs_data_path}/images/train\", max_results=5\n    ))\n\n    if len(blobs)\
+          \ == 0:\n        raise RuntimeError(\n            f\"No data found at gs://{bucket_name}/{gcs_data_path}.\
+          \ \"\n            f\"Run data/prepare_dataset.py first.\"\n        )\n\n\
+          \    print(f\"Data verified at gs://{bucket_name}/{gcs_data_path}\")\n \
+          \   print(f\"Found {len(blobs)}+ files\")\n    return f\"gs://{bucket_name}/{gcs_data_path}\"\
+          \n\n"
         image: python:3.10-slim
     exec-monitor-component:
       container:
@@ -427,32 +496,33 @@ deploymentSpec:
           \ *\n\ndef train_component(\n    project_id:    str,\n    region:      \
           \  str,\n    bucket_name:   str,\n    gcs_data_path: str,\n    epochs: \
           \       int,\n    batch_size:    int,\n    lr:            float,\n    dataset_uri:\
-          \   str,\n) -> str:\n    \"\"\"\n    Submit Vertex AI Custom Training Job\
-          \ running training/train.py on a T4 GPU.\n    The training script is fetched\
-          \ from gs://{bucket_name}/scripts/train.py.\n    Returns GCS path to the\
-          \ saved model.\n    \"\"\"\n    import google.cloud.aiplatform as aip\n\
-          \    from datetime import datetime\n\n    aip.init(project=project_id, location=region,\n\
-          \             staging_bucket=f\"gs://{bucket_name}\")\n\n    timestamp =\
-          \ datetime.now().strftime(\"%Y%m%d%H%M%S\")\n    job_name  = f\"rtdetr-kitti-{timestamp}\"\
-          \n\n    train_image = (\n        \"us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest\"\
-          \n    )\n\n    train_cmd = (\n        \"pip install -q transformers>=4.30.0\
-          \ google-cloud-storage Pillow tqdm && \"\n        f\"gsutil cp gs://{bucket_name}/scripts/train.py\
-          \ /tmp/train.py && \"\n        f\"python /tmp/train.py \"\n        f\"--epochs={epochs}\
-          \ \"\n        f\"--batch_size={batch_size} \"\n        f\"--lr={lr} \"\n\
-          \        f\"--bucket_name={bucket_name} \"\n        f\"--gcs_data_path={gcs_data_path}\
-          \ \"\n        \"--output_dir=/tmp/model_output\"\n    )\n\n    worker_pool_specs\
-          \ = [{\n        \"machine_spec\": {\n            \"machine_type\":     \
-          \  \"n1-standard-4\",\n            \"accelerator_type\":   \"NVIDIA_TESLA_T4\"\
-          ,\n            \"accelerator_count\":  1,\n        },\n        \"replica_count\"\
-          : 1,\n        \"container_spec\": {\n            \"image_uri\": train_image,\n\
-          \            \"command\":   [\"bash\", \"-c\"],\n            \"args\": \
-          \     [train_cmd],\n        },\n    }]\n\n    print(f\"Submitting job: {job_name}\"\
-          )\n    job = aip.CustomJob(\n        display_name      = job_name,\n   \
-          \     worker_pool_specs = worker_pool_specs,\n        staging_bucket   \
-          \ = f\"gs://{bucket_name}\",\n    )\n    job.run(sync=True)\n    print(f\"\
-          Job state: {job.state}\")\n\n    model_uri = f\"gs://{bucket_name}/models/rtdetr_kitti\"\
-          \n    print(f\"Model available at: {model_uri}\")\n    return model_uri\n\
-          \n"
+          \   str,\n) -> str:\n    import google.cloud.aiplatform as aip\n    from\
+          \ datetime import datetime\n\n    aip.init(project=project_id, location=region,\n\
+          \             staging_bucket=f\"gs://{bucket_name}\")\n\n    timestamp \
+          \ = datetime.now().strftime(\"%Y%m%d%H%M%S\")\n    job_name   = f\"yolos-kitti-{timestamp}\"\
+          \n    train_image = \"us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest\"\
+          \n\n    # Use function parameters not global variables\n    train_cmd =\
+          \ (\n        \"pip install -q transformers==4.40.0 torchvision>=0.15.0 timm\
+          \ \"\n        \"google-cloud-storage Pillow tqdm psutil numpy && \"\n  \
+          \      f\"python -c \\\"\"\n        f\"from google.cloud import storage;\
+          \ \"\n        f\"storage.Client(project='{project_id}').bucket('{bucket_name}').blob('scripts/train.py').download_to_filename('/tmp/train.py');\
+          \ \"\n        f\"print('train.py downloaded')\\\" && \"\n        \"PJRT_DEVICE=GPU\
+          \ DISABLE_XLA=1 USE_TORCH_XLA=0 \"\n        f\"python /tmp/train.py \"\n\
+          \        f\"--epochs={epochs} \"\n        f\"--batch_size={batch_size} \"\
+          \n        f\"--lr={lr} \"\n        f\"--bucket_name={bucket_name} \"\n \
+          \       f\"--gcs_data_path={gcs_data_path} \"\n        \"--output_dir=/tmp/model_output\"\
+          \n    )\n\n    worker_pool_specs = [{\n        \"machine_spec\": {\n   \
+          \         \"machine_type\":      \"n1-standard-4\",\n            \"accelerator_type\"\
+          :  \"NVIDIA_TESLA_T4\",\n            \"accelerator_count\": 1,\n       \
+          \ },\n        \"replica_count\": 1,\n        \"container_spec\": {\n   \
+          \         \"image_uri\": train_image,\n            \"command\":   [\"bash\"\
+          , \"-c\"],\n            \"args\":      [train_cmd],\n        },\n    }]\n\
+          \n    print(f\"Submitting training job: {job_name}\")\n    job = aip.CustomJob(\n\
+          \        display_name      = job_name,\n        worker_pool_specs = worker_pool_specs,\n\
+          \        staging_bucket    = f\"gs://{bucket_name}\",\n    )\n    job.run(sync=True)\n\
+          \n    # Model versioning \u2014 unique path per run\n    model_uri = f\"\
+          gs://{bucket_name}/models/runs/{timestamp}/best_model\"\n    print(f\"Model\
+          \ at: {model_uri}\")\n    return model_uri\n\n"
         image: python:3.10-slim
 pipelineInfo:
   description: 'RT-DETR KITTI: data_prep -> train -> optimize -> monitor'
@@ -460,6 +530,29 @@ pipelineInfo:
 root:
   dag:
     tasks:
+      autolabel-component:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-autolabel-component
+        inputs:
+          parameters:
+            box_threshold:
+              runtimeValue:
+                constant: 0.35
+            bucket_name:
+              componentInputParameter: bucket_name
+            num_samples:
+              componentInputParameter: autolabel_samples
+            output_gcs_path:
+              runtimeValue:
+                constant: kitti/autolabeled
+            project_id:
+              componentInputParameter: project_id
+            unlabeled_path:
+              componentInputParameter: unlabeled_path
+        taskInfo:
+          name: autolabel-component
       data-prep-component:
         cachingOptions:
           enableCache: true
@@ -554,6 +647,10 @@ root:
           name: train-component
   inputDefinitions:
     parameters:
+      autolabel_samples:
+        defaultValue: 50.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
       baseline_gcs_path:
         defaultValue: kitti/images/train
         isOptional: true
@@ -600,6 +697,10 @@ root:
         parameterType: STRING
       region:
         defaultValue: us-central1
+        isOptional: true
+        parameterType: STRING
+      unlabeled_path:
+        defaultValue: kitti/images/val
         isOptional: true
         parameterType: STRING
 schemaVersion: 2.1.0

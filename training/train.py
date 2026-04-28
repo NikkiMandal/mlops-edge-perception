@@ -10,6 +10,7 @@ import torch
 import argparse
 import psutil
 from pathlib import Path
+from datetime import datetime
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from transformers import (
@@ -337,7 +338,9 @@ def train():
     print("\n=== Uploading model to GCS ===")
     for file in (output_dir / "best_model").rglob("*"):
         if file.is_file():
-            gcs_path = f"models/rtdetr_kitti/{file.relative_to(output_dir)}"
+            #gcs_path = f"models/rtdetr_kitti/{file.relative_to(output_dir)}"
+            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            gcs_path = f"models/runs/{run_id}/{file.relative_to(output_dir)}"
             gcs_path = gcs_path.replace("\\", "/")
             upload_to_gcs(file, BUCKET_NAME, gcs_path)
 

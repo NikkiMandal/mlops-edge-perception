@@ -1,0 +1,60 @@
+name: Drift Monitor & Auto-Retrain
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # runs every 6 hours
+  workflow_dispatch:         # allows manual trigger from GitHub UI
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        pip install google-cloud-storage evidently pandas Pillow numpy
+
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Run drift detection
+      id: drift
+      run: |
+        python monitoring/drift_detect.py
+        
+        # Check if retrain trigger was written
+        if [ -f "monitoring/retrain_trigger.json" ]; then
+          echo "drift_detected=true" >> $GITHUB_OUTPUT
+          cat monitoring/retrain_trigger.json
+        else
+          echo "drift_detected=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Submit retraining pipeline
+      if: steps.drift.outputs.drift_detected == 'true'
+      run: |
+        pip install google-cloud-aiplatform kfp
+        python -c "
+        from pipelines.pipeline import submit_pipeline
+        submit_pipeline()
+        print('Retraining pipeline submitted')
+        "
+      env:
+        GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Upload drift report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: drift-report
+        path: monitoring/reports/

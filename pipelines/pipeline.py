@@ -19,6 +19,128 @@ PIPELINE_ROOT = f"{BUCKET}/pipeline_runs"
 
 TRAIN_IMAGE = "us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest"
 
+#-------------------------Grounding DINO auto-labeling component-------------------------
+@dsl.component(
+    base_image="python:3.10-slim",
+    packages_to_install=[
+        "google-cloud-storage>=2.0.0",
+        "Pillow>=9.0.0",
+        "tqdm>=4.0.0",
+        "transformers>=4.40.0",
+        "torch>=2.0.0",
+        "timm>=0.9.0",
+    ],
+)
+def autolabel_component(
+    project_id:      str,
+    bucket_name:     str,
+    unlabeled_path:  str,
+    output_gcs_path: str,
+    num_samples:     int,
+    box_threshold:   float,
+) -> str:
+    """
+    Stage 1: Auto-label unlabeled images using Grounding DINO.
+    Uses open-vocabulary detection with text prompts.
+    Returns GCS path to auto-labeled outputs.
+    """
+    import json
+    import torch
+    from pathlib import Path
+    from PIL import Image, ImageDraw
+    from google.cloud import storage
+    from tqdm import tqdm
+    from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+
+    LOCAL_IMAGES = Path("/tmp/autolabel/images")
+    LOCAL_OUTPUT = Path("/tmp/autolabel/outputs")
+    TEXT_PROMPTS = "car . pedestrian . cyclist ."
+    CLASSES      = {"car": 0, "pedestrian": 1, "cyclist": 2}
+
+    # Download images
+    client    = storage.Client(project=project_id)
+    bucket    = client.bucket(bucket_name)
+    blobs     = [b for b in bucket.list_blobs(prefix=unlabeled_path)
+                 if b.name.endswith(".png")][:num_samples]
+    LOCAL_IMAGES.mkdir(parents=True, exist_ok=True)
+    for blob in blobs:
+        blob.download_to_filename(str(LOCAL_IMAGES / Path(blob.name).name))
+    print(f"Downloaded {len(blobs)} images")
+
+    # Load Grounding DINO
+    model_id  = "IDEA-Research/grounding-dino-tiny"
+    processor = AutoProcessor.from_pretrained(model_id)
+    model     = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
+    model.eval()
+    print("Grounding DINO loaded")
+
+    # Auto-label
+    labels_dir = LOCAL_OUTPUT / "labels"
+    viz_dir    = LOCAL_OUTPUT / "visualizations"
+    labels_dir.mkdir(parents=True, exist_ok=True)
+    viz_dir.mkdir(parents=True, exist_ok=True)
+
+    stats = {"total": 0, "labeled": 0, "boxes": 0}
+
+    for img_path in sorted(LOCAL_IMAGES.glob("*.png")):
+        stats["total"] += 1
+        try:
+            img_pil = Image.open(img_path).convert("RGB")
+            w, h    = img_pil.size
+            inputs  = processor(
+                images=img_pil,
+                text=TEXT_PROMPTS,
+                return_tensors="pt"
+            )
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            results = processor.post_process_grounded_object_detection(
+                outputs,
+                threshold=box_threshold,
+                target_sizes=[(h, w)]
+            )[0]
+
+            boxes  = results["boxes"].tolist()
+            labels = results.get("text_labels", results.get("labels", []))
+            yolo_lines = []
+            for box, label in zip(boxes, labels):
+                label_str = label if isinstance(label, str) else str(label)
+                class_id  = CLASSES.get(label_str.lower().strip(), -1)
+                if class_id == -1:
+                    continue
+                x1, y1, x2, y2 = box
+                cx = (x1 + x2) / 2 / w
+                cy = (y1 + y2) / 2 / h
+                bw = (x2 - x1) / w
+                bh = (y2 - y1) / h
+                if bw > 0 and bh > 0:
+                    yolo_lines.append(
+                        f"{class_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
+                    )
+
+            if yolo_lines:
+                (labels_dir / img_path.with_suffix(".txt").name).write_text(
+                    "\n".join(yolo_lines)
+                )
+                stats["labeled"] += 1
+                stats["boxes"]   += len(yolo_lines)
+
+        except Exception as e:
+            print(f"Error on {img_path.name}: {e}")
+
+    print(f"Labeled {stats['labeled']}/{stats['total']} images, "
+          f"{stats['boxes']} boxes")
+
+    # Upload to GCS
+    for f in LOCAL_OUTPUT.rglob("*"):
+        if f.is_file():
+            rel = f.relative_to(LOCAL_OUTPUT)
+            bucket.blob(
+                f"{output_gcs_path}/{rel}".replace("\\", "/")
+            ).upload_from_filename(str(f))
+
+    return f"gs://{bucket_name}/{output_gcs_path}"
 
 # ── Component 1: Data Preparation ─────────────────────────────────────────────
 @dsl.component(
@@ -72,28 +194,24 @@ def train_component(
     lr:            float,
     dataset_uri:   str,
 ) -> str:
-    """
-    Submit Vertex AI Custom Training Job running training/train.py on a T4 GPU.
-    The training script is fetched from gs://{bucket_name}/scripts/train.py.
-    Returns GCS path to the saved model.
-    """
     import google.cloud.aiplatform as aip
     from datetime import datetime
 
     aip.init(project=project_id, location=region,
              staging_bucket=f"gs://{bucket_name}")
 
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    job_name  = f"rtdetr-kitti-{timestamp}"
+    timestamp  = datetime.now().strftime("%Y%m%d%H%M%S")
+    job_name   = f"yolos-kitti-{timestamp}"
+    train_image = "us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest"
 
-    train_image = (
-        "us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-1.py310:latest"
-    )
-
+    # Use function parameters not global variables
     train_cmd = (
         "pip install -q transformers==4.40.0 torchvision>=0.15.0 timm "
         "google-cloud-storage Pillow tqdm psutil numpy && "
-        f"gsutil cp gs://{bucket_name}/scripts/train.py /tmp/train.py && "
+        f"python -c \""
+        f"from google.cloud import storage; "
+        f"storage.Client(project='{project_id}').bucket('{bucket_name}').blob('scripts/train.py').download_to_filename('/tmp/train.py'); "
+        f"print('train.py downloaded')\" && "
         "PJRT_DEVICE=GPU DISABLE_XLA=1 USE_TORCH_XLA=0 "
         f"python /tmp/train.py "
         f"--epochs={epochs} "
@@ -106,9 +224,9 @@ def train_component(
 
     worker_pool_specs = [{
         "machine_spec": {
-            "machine_type":       "n1-standard-4",
-            "accelerator_type":   "NVIDIA_TESLA_T4",
-            "accelerator_count":  1,
+            "machine_type":      "n1-standard-4",
+            "accelerator_type":  "NVIDIA_TESLA_T4",
+            "accelerator_count": 1,
         },
         "replica_count": 1,
         "container_spec": {
@@ -118,17 +236,17 @@ def train_component(
         },
     }]
 
-    print(f"Submitting job: {job_name}")
+    print(f"Submitting training job: {job_name}")
     job = aip.CustomJob(
         display_name      = job_name,
         worker_pool_specs = worker_pool_specs,
         staging_bucket    = f"gs://{bucket_name}",
     )
     job.run(sync=True)
-    print(f"Job state: {job.state}")
 
-    model_uri = f"gs://{bucket_name}/models/rtdetr_kitti"
-    print(f"Model available at: {model_uri}")
+    # Model versioning — unique path per run
+    model_uri = f"gs://{bucket_name}/models/runs/{timestamp}/best_model"
+    print(f"Model at: {model_uri}")
     return model_uri
 
 
@@ -457,7 +575,18 @@ def kitti_pipeline(
     drift_threshold:   float = 0.3,
     baseline_gcs_path: str   = "kitti/images/train",
     new_data_gcs_path: str   = "kitti/images/val",
+    unlabeled_path:    str   = "kitti/images/val",
+    autolabel_samples: int   = 50,
 ) -> None:
+
+    autolabel_task = autolabel_component(
+        project_id      = project_id,
+        bucket_name     = bucket_name,
+        unlabeled_path  = unlabeled_path,
+        output_gcs_path = "kitti/autolabeled",
+        num_samples     = autolabel_samples,
+        box_threshold   = 0.35,
+    )
 
     data_task = data_prep_component(
         project_id    = project_id,
@@ -465,7 +594,7 @@ def kitti_pipeline(
         gcs_data_path = gcs_data_path,
         num_train     = num_train,
         num_val       = num_val,
-    )
+    ).after(autolabel_task)
 
     train_task = train_component(
         project_id    = project_id,
