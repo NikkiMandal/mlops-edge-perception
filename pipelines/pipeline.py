@@ -255,7 +255,8 @@ def train_component(
     base_image="python:3.10-slim",
     packages_to_install=[
         "torch>=2.0.0",
-        "transformers>=4.30.0",
+        "transformers==4.40.0",
+        "timm",
         "onnx>=1.14.0",
         "onnxruntime>=1.16.0",
         "google-cloud-storage>=2.0.0",
@@ -285,7 +286,7 @@ def optimize_component(
     OUTPUT_DIR  = Path("/tmp/optimize_outputs")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    MODEL_GCS_PREFIX = "models/rtdetr_kitti/best_model"
+    MODEL_GCS_PREFIX = model_uri.replace(f"gs://{bucket_name}/", "")
     DUMMY_SHAPE      = (1, 3, 640, 640)
     WARMUP           = 10
     BENCH_RUNS       = 50
@@ -382,48 +383,45 @@ def optimize_component(
         "size_mb":    round(onnx_size, 1),
     }
 
-    # ── INT8 PTQ ───────────────────────────────────────────────────────────────
+    # ── INT8 PTQ using ONNX Runtime ───────────────────────────────────────────────
     try:
-        import torch.quantization as quant
-        model_cpu  = model.cpu()
-        model_cpu.eval()
-        model_cpu.qconfig = quant.get_default_qconfig("fbgemm")
-        prepared   = quant.prepare(model_cpu, inplace=False)
-        calibration_dummy = torch.randn(DUMMY_SHAPE)
-        with torch.no_grad():
-            for _ in range(20):
-                try:
-                    prepared(pixel_values=calibration_dummy)
-                except Exception:
-                    pass
-        model_ptq = quant.convert(prepared, inplace=False)
-        ms, fps, size = bench_torch(model_ptq, dummy, "INT8 PTQ")
+        from onnxruntime.quantization import quantize_dynamic, QuantType
+        int8_path = OUTPUT_DIR / "rtdetr_int8.onnx"
+        quantize_dynamic(
+            model_input  = str(onnx_path),
+            model_output = str(int8_path),
+            weight_type  = QuantType.QInt8,
+        )
+        int8_size = int8_path.stat().st_size / (1024 * 1024)
+        # Benchmark INT8
+        sess_int8 = ort.InferenceSession(str(int8_path), providers=["CPUExecutionProvider"])
+        lats = []
+        for _ in range(BENCH_RUNS):
+            t0 = time.perf_counter()
+            sess_int8.run(None, {"pixel_values": inp_np})
+            lats.append((time.perf_counter() - t0) * 1000)
+        int8_ms  = float(np.mean(lats))
+        int8_fps = 1000.0 / int8_ms
+        print(f"  ONNX INT8: {int8_ms:.1f}ms | {int8_fps:.1f} FPS | {int8_size:.1f}MB")
         results["int8_ptq"] = {
-            "format":     "INT8 PTQ",
-            "latency_ms": round(ms, 2),
-            "fps":        round(fps, 1),
-            "size_mb":    round(size, 1),
+            "format":     "ONNX INT8 PTQ",
+            "latency_ms": round(int8_ms, 2),
+            "fps":        round(int8_fps, 1),
+            "size_mb":    round(int8_size, 1),
         }
     except Exception as e:
-        print(f"PTQ skipped: {e}")
-        results["int8_ptq"] = {"format": "INT8 PTQ", "error": str(e)}
-
-    # ── Print table ────────────────────────────────────────────────────────────
-    print(f"\n{'Format':<20} {'Latency(ms)':<14} {'FPS':<10} {'Size(MB)'}")
-    print("-" * 56)
-    for r in results.values():
-        if "error" in r:
-            print(f"{r['format']:<20} SKIPPED: {r['error'][:30]}")
-        else:
-            print(f"{r['format']:<20} {r['latency_ms']:<14} "
-                  f"{r['fps']:<10} {r['size_mb']}")
+        print(f"INT8 skipped: {e}")
+        results["int8_ptq"] = {"format": "ONNX INT8 PTQ", "error": str(e)}
 
     # ── Upload results ─────────────────────────────────────────────────────────
     bench_path = OUTPUT_DIR / "benchmark_results.json"
     bench_path.write_text(json.dumps(results, indent=2))
 
     gcs_out_prefix = "models/rtdetr_kitti/optimized"
-    for f in [onnx_path, bench_path]:
+    files_to_upload = [onnx_path, bench_path]
+    if (OUTPUT_DIR / "rtdetr_int8.onnx").exists():
+        files_to_upload.append(OUTPUT_DIR / "rtdetr_int8.onnx")
+    for f in files_to_upload:
         blob = client.bucket(bucket_name).blob(f"{gcs_out_prefix}/{f.name}")
         blob.upload_from_filename(str(f))
         print(f"Uploaded gs://{bucket_name}/{gcs_out_prefix}/{f.name}")
