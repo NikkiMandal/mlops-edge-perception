@@ -364,18 +364,19 @@ deploymentSpec:
           \   from transformers import AutoModelForObjectDetection\n    from google.cloud\
           \ import storage\n\n    LOCAL_MODEL = Path(\"/tmp/rtdetr_model\")\n    OUTPUT_DIR\
           \  = Path(\"/tmp/optimize_outputs\")\n    OUTPUT_DIR.mkdir(parents=True,\
-          \ exist_ok=True)\n\n    MODEL_GCS_PREFIX = model_uri.replace(f\"gs://{bucket_name}/\"\
-          , \"\")\n    DUMMY_SHAPE      = (1, 3, 640, 640)\n    WARMUP           =\
-          \ 5\n    BENCH_RUNS       = 20\n\n    # \u2500\u2500 Download model \u2500\
+          \ exist_ok=True)\n\n    #MODEL_GCS_PREFIX = model_uri.replace(f\"gs://{bucket_name}/\"\
+          , \"\")\n    MODEL_GCS_PREFIX = \"models/rtdetr_kitti/best_model\"\n   \
+          \ DUMMY_SHAPE      = (1, 3, 640, 640)\n    WARMUP           = 5\n    BENCH_RUNS\
+          \       = 20\n\n    # \u2500\u2500 Download model \u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
           \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
-          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    print(f\"Downloading\
-          \ model from gs://{bucket_name}/{MODEL_GCS_PREFIX}...\")\n    client = storage.Client(project=project_id)\n\
-          \    bucket = client.bucket(bucket_name)\n    blobs  = [b for b in bucket.list_blobs(prefix=MODEL_GCS_PREFIX)\n\
-          \              if not b.name.endswith(\"/\")]\n\n    if not blobs:\n   \
-          \     raise RuntimeError(f\"No model blobs at gs://{bucket_name}/{MODEL_GCS_PREFIX}\"\
+          \u2500\u2500\u2500\u2500\u2500\n    print(f\"Downloading model from gs://{bucket_name}/{MODEL_GCS_PREFIX}...\"\
+          )\n    client = storage.Client(project=project_id)\n    bucket = client.bucket(bucket_name)\n\
+          \    blobs  = [b for b in bucket.list_blobs(prefix=MODEL_GCS_PREFIX)\n \
+          \             if not b.name.endswith(\"/\")]\n\n    if not blobs:\n    \
+          \    raise RuntimeError(f\"No model blobs at gs://{bucket_name}/{MODEL_GCS_PREFIX}\"\
           )\n\n    LOCAL_MODEL.mkdir(parents=True, exist_ok=True)\n    for blob in\
           \ blobs:\n        rel  = blob.name[len(MODEL_GCS_PREFIX) + 1:]\n       \
           \ dest = LOCAL_MODEL / rel\n        dest.parent.mkdir(parents=True, exist_ok=True)\n\

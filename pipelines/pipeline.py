@@ -288,7 +288,8 @@ def optimize_component(
     OUTPUT_DIR  = Path("/tmp/optimize_outputs")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    MODEL_GCS_PREFIX = model_uri.replace(f"gs://{bucket_name}/", "")
+    #MODEL_GCS_PREFIX = model_uri.replace(f"gs://{bucket_name}/", "")
+    MODEL_GCS_PREFIX = "models/rtdetr_kitti/best_model"
     DUMMY_SHAPE      = (1, 3, 640, 640)
     WARMUP           = 5
     BENCH_RUNS       = 20
