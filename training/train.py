@@ -336,13 +336,18 @@ def train():
 
     # Step 7 — Upload model to GCS
     print("\n=== Uploading model to GCS ===")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")  # ← move outside loop
     for file in (output_dir / "best_model").rglob("*"):
         if file.is_file():
-            #gcs_path = f"models/rtdetr_kitti/{file.relative_to(output_dir)}"
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Versioned path
             gcs_path = f"models/runs/{run_id}/{file.relative_to(output_dir)}"
             gcs_path = gcs_path.replace("\\", "/")
             upload_to_gcs(file, BUCKET_NAME, gcs_path)
+
+            # Fixed path for optimize_component
+            fixed_path = f"models/yolos_kitti/{file.relative_to(output_dir)}"
+            fixed_path = fixed_path.replace("\\", "/")
+            upload_to_gcs(file, BUCKET_NAME, fixed_path)
 
     #upload_to_gcs(metrics_path, BUCKET_NAME, "models/rtdetr_kitti/metrics.json") 
     upload_to_gcs(metrics_path, BUCKET_NAME, "models/yolos_kitti/metrics.json")  #changed model, hence changing path names
