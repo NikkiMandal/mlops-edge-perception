@@ -14,7 +14,8 @@ BUCKET_URI   = f"gs://{BUCKET_NAME}"
 
 # Job settings
 TIMESTAMP    = datetime.now().strftime("%Y%m%d_%H%M%S")
-JOB_NAME     = f"rtdetr-kitti-{TIMESTAMP}"
+#JOB_NAME     = f"rtdetr-kitti-{TIMESTAMP}"
+JOB_NAME     = f"yolos-kitti-{TIMESTAMP}"  #changed model, hence changing path names, do same for vertext_jpb_cpu if using that file for testing on cpu
 
 # Machine settings — T4 GPU is cheapest on Vertex AI (~$0.35/hr)
 MACHINE_TYPE      = "n1-standard-4"
@@ -83,7 +84,7 @@ def submit_training_job():
     print(f"Monitor at:   https://console.cloud.google.com/vertex-ai/training/custom-jobs?project={PROJECT_ID}")
 
     print(f"\n=== Job Complete ===")
-    print(f"Check results at: gs://{BUCKET_NAME}/models/rtdetr_kitti/")
+    print(f"Check results at: gs://{BUCKET_NAME}/models/yolos_kitti/") #change path name to match model name if using yolos instead of rtdetr
 
 
 if __name__ == "__main__":

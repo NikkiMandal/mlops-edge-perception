@@ -259,6 +259,20 @@ python -c "from pipelines.pipeline import submit_pipeline; submit_pipeline()"
 
 ---
 
+## Model Naming Note
+
+Throughout this codebase you may encounter references to `rtdetr` in:
+- GCS bucket paths (`models/rtdetr_kitti/`)
+- Vertex AI job names (`rtdetr-kitti-TIMESTAMP`)
+- Output screenshots and pipeline run names
+- ONNX output files (`rtdetr_fp32.onnx`)
+
+**This is a historical artifact.** The project originally targeted RT-DETR but switched to YOLOS-tiny due to a PyTorch version incompatibility in Vertex AI prebuilt containers (RT-DETR requires `transformers>=4.44` which needs PyTorch>=2.4, but the container ships PyTorch 2.1).
+
+YOLOS (You Only Look at One Sequence) is architecturally similar to DETR — both are transformer-based set-prediction detectors. The switch had zero impact on the MLOps pipeline architecture.
+
+All new pipeline runs use the name `yolos-kitti` consistently. Existing GCS paths with `rtdetr_kitti` remain valid and point to the same trained YOLOS-tiny model weights.
+
 ## Debugging Notes
 
 Major issues encountered and resolved during development:
@@ -272,7 +286,7 @@ Major issues encountered and resolved during development:
 
 ## Author
 
-Nikita Vinod — MS Electrical and Computer Engineering, Northeastern University (December 2025)
+Nikita Vinod Mandal — MS Electrical and Computer Engineering, Northeastern University (December 2025)
 
 Specialization: ML Engineering, Edge AI Deployment, Perception Systems
 

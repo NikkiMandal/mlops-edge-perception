@@ -344,11 +344,12 @@ def train():
             gcs_path = gcs_path.replace("\\", "/")
             upload_to_gcs(file, BUCKET_NAME, gcs_path)
 
-    upload_to_gcs(metrics_path, BUCKET_NAME, "models/rtdetr_kitti/metrics.json")
+    #upload_to_gcs(metrics_path, BUCKET_NAME, "models/rtdetr_kitti/metrics.json") 
+    upload_to_gcs(metrics_path, BUCKET_NAME, "models/yolos_kitti/metrics.json")  #changed model, hence changing path names
 
     print(f"\n=== Training Complete ===")
     print(f"Best val loss: {best_val_loss:.4f}")
-    print(f"Model saved to gs://{BUCKET_NAME}/models/rtdetr_kitti/")
+    print(f"Model saved to gs://{BUCKET_NAME}/models/yolos_kitti/") #changed model, hence changing path names
 
 
 if __name__ == "__main__":

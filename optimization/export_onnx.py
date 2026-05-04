@@ -21,8 +21,8 @@ os.environ["USE_TORCH_XLA"] = "0"
 # ── Configuration ─────────────────────────────────────────────
 PROJECT_ID      = "mlops-edge-perception"
 BUCKET_NAME     = "mlops-edge-perception-bucket"
-MODEL_GCS_PATH  = "models/rtdetr_kitti/best_model"
-LOCAL_MODEL_DIR = Path("/tmp/rtdetr_model")
+MODEL_GCS_PATH  = "models/yolos_kitti/best_model"  
+LOCAL_MODEL_DIR = Path("/tmp/yolos_model")
 OUTPUT_DIR      = Path("optimization/outputs")
 CLASSES         = ["Car", "Pedestrian", "Cyclist"]
 DEVICE          = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -66,7 +66,7 @@ def download_model_from_gcs():
 
 # ── Load Model ────────────────────────────────────────────────
 def load_model():
-    """Load trained RT-DETR model from local disk."""
+    """Load trained yolos model from local disk."""
     print(f"\n=== Loading model ===")
     processor = AutoImageProcessor.from_pretrained(str(LOCAL_MODEL_DIR))
     model     = AutoModelForObjectDetection.from_pretrained(str(LOCAL_MODEL_DIR))
@@ -292,7 +292,7 @@ def run_benchmarks(model):
     print("\n" + "="*50)
     print("BENCHMARK 3: ONNX FP32")
     print("="*50)
-    onnx_path = OUTPUT_DIR / "rtdetr_fp32.onnx"
+    onnx_path = OUTPUT_DIR / "yolos_fp32.onnx"
     export_to_onnx(model, onnx_path)
     mean_ms, p95_ms, fps, size_mb = benchmark_onnx(onnx_path, "fp32")
     results["onnx_fp32"] = {
@@ -328,7 +328,7 @@ def run_benchmarks(model):
 def print_benchmark_table(results):
     """Print results as a formatted table."""
     print("\n" + "="*70)
-    print("BENCHMARK TABLE — RT-DETR KITTI")
+    print("BENCHMARK TABLE — YOLOS KITTI")
     print("="*70)
     print(f"{'Format':<20} {'Latency(ms)':<15} {'P95(ms)':<12} "
           f"{'FPS':<10} {'Size(MB)':<10}")
@@ -358,7 +358,7 @@ def save_results(results):
 
 # ── Entry Point ───────────────────────────────────────────────
 def main():
-    print("=== RT-DETR Optimization Benchmark ===")
+    print("=== YOLOS Optimization Benchmark ===")
     print(f"Will benchmark: FP32 → FP16 → ONNX FP32 → INT8 PTQ")
 
     global OUTPUT_DIR

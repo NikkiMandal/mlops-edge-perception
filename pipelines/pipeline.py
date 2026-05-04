@@ -284,12 +284,12 @@ def optimize_component(
     from transformers import AutoModelForObjectDetection
     from google.cloud import storage
 
-    LOCAL_MODEL = Path("/tmp/rtdetr_model")
+    LOCAL_MODEL = Path("/tmp/yolos_model")
     OUTPUT_DIR  = Path("/tmp/optimize_outputs")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     #MODEL_GCS_PREFIX = model_uri.replace(f"gs://{bucket_name}/", "")
-    MODEL_GCS_PREFIX = "models/rtdetr_kitti/best_model"
+    MODEL_GCS_PREFIX = "models/yolos_kitti/best_model"
     DUMMY_SHAPE      = (1, 3, 640, 640)
     WARMUP           = 5
     BENCH_RUNS       = 20
@@ -347,7 +347,7 @@ def optimize_component(
     }
 
     # ── Export ONNX ────────────────────────────────────────────────────────────
-    onnx_path = OUTPUT_DIR / "rtdetr_fp32.onnx"
+    onnx_path = OUTPUT_DIR / "yolos_fp32.onnx"
     print("\nExporting ONNX (opset 17)...")
     gc.collect()
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
@@ -392,7 +392,7 @@ def optimize_component(
     # ── INT8 PTQ using ONNX Runtime ───────────────────────────────────────────────
     try:
         from onnxruntime.quantization import quantize_dynamic, QuantType
-        int8_path = OUTPUT_DIR / "rtdetr_int8.onnx"
+        int8_path = OUTPUT_DIR / "yolos_int8.onnx"
         quantize_dynamic(
             model_input  = str(onnx_path),
             model_output = str(int8_path),
@@ -423,10 +423,10 @@ def optimize_component(
     bench_path = OUTPUT_DIR / "benchmark_results.json"
     bench_path.write_text(json.dumps(results, indent=2))
 
-    gcs_out_prefix = "models/rtdetr_kitti/optimized"
+    gcs_out_prefix = "models/yolos_kitti/optimized"
     files_to_upload = [onnx_path, bench_path]
-    if (OUTPUT_DIR / "rtdetr_int8.onnx").exists():
-        files_to_upload.append(OUTPUT_DIR / "rtdetr_int8.onnx")
+    if (OUTPUT_DIR / "yolos_int8.onnx").exists():
+        files_to_upload.append(OUTPUT_DIR / "yolos_int8.onnx")
     for f in files_to_upload:
         blob = client.bucket(bucket_name).blob(f"{gcs_out_prefix}/{f.name}")
         blob.upload_from_filename(str(f))
@@ -563,8 +563,8 @@ def monitor_component(
 
 # ── Pipeline DAG ───────────────────────────────────────────────────────────────
 @dsl.pipeline(
-    name        = "kitti-rtdetr-pipeline",
-    description = "RT-DETR KITTI: data_prep -> train -> optimize -> monitor",
+    name        = "kitti-yolos-pipeline",
+    description = "YOLOS KITTI: data_prep -> train -> optimize -> monitor",
 )
 def kitti_pipeline(
     project_id:        str   = PROJECT_ID,
@@ -646,7 +646,7 @@ def submit_pipeline(
     aip.init(project=PROJECT_ID, location=REGION, staging_bucket=BUCKET)
 
     job = aip.PipelineJob(
-        display_name   = f"kitti-rtdetr-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        display_name   = f"kitti-yolos-{datetime.now().strftime('%Y%m%d%H%M%S')}",
         template_path  = compiled_path,
         pipeline_root  = PIPELINE_ROOT,
         enable_caching = False, #changed to false because it wasn't installing new required packages 
